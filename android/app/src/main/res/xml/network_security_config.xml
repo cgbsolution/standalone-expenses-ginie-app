@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Trust the self-signed cert shipped in res/raw/chat_host.pem,
+         only for the chat host at 147.93.103.97. -->
+    <domain-config includeSubdomains="true">
+        <domain>147.93.103.97</domain>
+        <trust-anchors>
+            <certificates src="@raw/chat_host"/>
+            <certificates src="system"/>
+        </trust-anchors>
+    </domain-config>
+
+    <!-- Default: still trust the OS CA store + allow cleartext for the chat host. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+</network-security-config>

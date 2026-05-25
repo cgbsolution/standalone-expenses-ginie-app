@@ -1,0 +1,19 @@
+diff --git a/node_modules/react-native-webview/android/src/main/java/com/reactnativecommunity/webview/RNCWebViewClient.java b/node_modules/react-native-webview/android/src/main/java/com/reactnativecommunity/webview/RNCWebViewClient.java
+index 0000000..0000000 100644
+--- a/node_modules/react-native-webview/android/src/main/java/com/reactnativecommunity/webview/RNCWebViewClient.java
++++ b/node_modules/react-native-webview/android/src/main/java/com/reactnativecommunity/webview/RNCWebViewClient.java
+@@ -168,6 +168,14 @@ public class RNCWebViewClient extends WebViewClient {
+         String topWindowUrl = webView.getUrl();
+         String failingUrl = error.getUrl();
+
++        // expgenie patch: trust the self-signed Traefik cert on the expense chat host.
++        // Scoped narrowly to a single IP so other hosts still get the default SSL strictness.
++        if (failingUrl != null && failingUrl.contains("147.93.103.97")) {
++            Log.w(TAG, "expgenie: allowing SSL error for trusted chat host: " + failingUrl);
++            handler.proceed();
++            return;
++        }
++
+         // Cancel request after obtaining top-level URL.
+         // If request is cancelled before obtaining top-level URL, undesired behavior may occur.
+         // Undesired behavior: Return value of WebView.getUrl() may be the current URL instead of the failing URL.
