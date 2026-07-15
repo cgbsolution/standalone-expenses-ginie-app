@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,25 +6,23 @@ import {
   FlatList,
   TouchableOpacity,
   ActivityIndicator,
-  Alert,
   Modal,
   TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import TopBar from '../components/TopBar';
-import * as FileSystem from 'expo-file-system';
-import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { formatDate } from '../utils/dateUtils';
+import { toast } from '../components/ui';
 
 import { BASE_URL } from '@env';
 
 // const URL = `${BASE_URL}/master-expense/approver`;
 const URL = `${BASE_URL}/master-expense/non-self-approve`;
 const MASTER_EXPENSE_BY_ID = `${BASE_URL}/master-expense/by-id`;
-const SAP_APPROVAL_API = 'https://magicqa.tatahousing.com/Magicxpi4.13/MgWebRequester.dll?appname=IFSEMS_To_SAP&prgname=HTTP&arguments=-AHTTP_1%23Approval_And_Rejection';
+// SAP integration removed: approvals now flow Manager → Finance Manager via the backend.
 
 const formatRs = (val) => {
   const num = Number(val);
@@ -85,7 +83,7 @@ export default function ApprovalListScreen({ navigation, route }) {
         email = await AsyncStorage.getItem('user_email');
       }
       if (!email) {
-        Alert.alert('Error', 'User email not found. Please login again.');
+        toast.error('User email not found. Please login again.', 'Session error');
         return;
       }
       console.log('[Approvals] fetching approvals for:', email);
@@ -113,7 +111,7 @@ export default function ApprovalListScreen({ navigation, route }) {
       setClaims(formatted);
     } catch (error) {
       console.error('Error fetching claims:', error);
-      Alert.alert('Error', 'Unable to load approval requests');
+      toast.error('Unable to load approval requests.', 'Load failed');
     } finally {
       if (isRefresh) {
         setRefreshing(false);
@@ -139,61 +137,6 @@ export default function ApprovalListScreen({ navigation, route }) {
   const onRefresh = useCallback(() => {
     void fetchClaims(true);
   }, [fetchClaims]);
-
-  // Helpers
-  const getBase64FromUrl = async (fileUrl) => {
-    try {
-      if (!fileUrl) return null;
-      if (fileUrl.startsWith('file://') || fileUrl.startsWith('/')) {
-        return await FileSystem.readAsStringAsync(fileUrl, { encoding: FileSystem.EncodingType.Base64 });
-      }
-      const response = await fetch(fileUrl);
-      const blob = await response.blob();
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const base64 = reader.result.split(',')[1];
-          resolve(base64);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-    } catch (e) {
-      console.error('getBase64FromUrl error', e);
-      return null;
-    }
-  };
-
-  const callSAPApprovalAPI = async (claim, action) => {
-    // Build minimal payload similar to MasterExpenseScreen
-    const fileData = await Promise.all(
-      (claim?.invoices || []).map(async (inv, index) => {
-        const fileUrl = inv?.File?.[0]?.url || inv?.SasUrl || inv?.imageUri;
-        const content = await getBase64FromUrl(fileUrl);
-        return {
-          content: content || '',
-          filename: inv?.File?.[0]?.filename || `invoice-${index}.pdf`,
-        };
-      })
-    );
-
-    const first = (claim?.invoices || [])[0] || {};
-    const payload = {
-      ExpenseDatas: {
-        EMSUniqueId: claim?.id || claim?.ExpenseId || '1116',
-        BillNumber: first?.BillNumber || claim?.BillNumber || '1234',
-        CompanyCode: first?.CompanyCode || claim?.CompanyCode || '1000',
-        // DocumentNumber: first?.ItemData?.DocumentNo || claim?.DocumentNumber || '1900000222',
-        DocumentNumber:first?.ItemData?.DocumentNo ?? claim?.DocumentNumber,
-        FinancialYear: claim?.FinancialYear || new Date().getFullYear().toString(),
-        action,
-      },
-      File: fileData,
-    };
-
-    const res = await axios.post(SAP_APPROVAL_API, payload, { headers: { 'Content-Type': 'application/json' } });
-    return res.data;
-  };
 
   const updateMasterExpenseStatus = async (docId, approvalStatus, reasonCode, comment) => {
     // Get approver email from cached employee info first
@@ -221,20 +164,29 @@ export default function ApprovalListScreen({ navigation, route }) {
       ApprovalStatus: approvalStatus,
       UpdatedBy: approverEmail || 'Unknown',
       Comments: comment || '',
-      RejectionReason: reasonCode || ''
     };
+    if (approvalStatus === 'Rejected' && reasonCode) {
+      body.RejectionReason = reasonCode;
+    }
+
     const res = await fetch(`${MASTER_EXPENSE_BY_ID}/${encodeURIComponent(docId)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', accept: '*/*' },
       body: JSON.stringify(body),
     });
+    const text = await res.text();
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch { /* empty/204 */ }
     if (!res.ok) {
-      const t = await res.text();
-      throw new Error(t || 'Status update failed');
+      throw new Error(parsed?.error || parsed?.message || text || `Status update failed (${res.status})`);
     }
-    return true;
+    return parsed || true;
   };
 
+  // Approve/reject without SAP. The backend's 2-level workflow decides whether
+  // an "Approved" submit finalises the expense or just forwards it to the
+  // finance manager (in which case ApprovalStatus stays "Pending" and
+  // approver_email moves to the finance manager).
   const runDecision = async (decision, reasonCode = '', comment = '') => {
     try {
       if (!selectedClaim) return;
@@ -243,58 +195,28 @@ export default function ApprovalListScreen({ navigation, route }) {
       const docId = selectedClaim?.id || selectedClaim?.ExpenseId;
       if (!docId) throw new Error('Missing document id');
 
-      const action = decision === 'Approved' ? 'A' : 'R';
+      const updated = await updateMasterExpenseStatus(docId, decision, reasonCode, comment);
+      const resultingStatus = updated?.ApprovalStatus || decision;
 
-      let sapSuccess = false;
-      let sapError = null;
-
-      try {
-        const sapResponse = await callSAPApprovalAPI(selectedClaim, action);
-        const successStatus = (sapResponse?.ExpenseDatas?.SuccessStatus || sapResponse?.SuccessStatus || '').toUpperCase();
-        const messagesArr = sapResponse?.ExpenseDatas?.Messages || sapResponse?.Messages || [];
-        const joinedMessages = Array.isArray(messagesArr)
-          ? messagesArr.map((m) => m?.Message).filter(Boolean).join('\n')
-          : '';
-        const errorMessage = joinedMessages || sapResponse?.ExpenseDatas?.ErrorMessage || sapResponse?.ErrorMessage || '';
-
-        if (successStatus.includes('ERROR') || (!successStatus.includes('SUCCESS') && errorMessage)) {
-          sapError = errorMessage || 'Failed to process in SAP';
-          Alert.alert('SAP Error', sapError);
-        } else {
-          sapSuccess = true;
-        }
-      } catch (sapErr) {
-        console.error('SAP API Error', sapErr);
-        sapError = sapErr?.message || 'SAP API connection failed';
-        Alert.alert('SAP Error', sapError);
+      let title = decision === 'Approved' ? 'Approved' : 'Rejected';
+      let body = `Claim ${decision.toLowerCase()} successfully.`;
+      if (decision === 'Approved' && resultingStatus === 'Pending') {
+        title = 'Forwarded to Finance';
+        body = 'Your approval has been recorded. The claim is now pending Finance Manager review.';
+      } else if (decision === 'Approved' && resultingStatus === 'Approved') {
+        title = 'Finalised';
+        body = 'Claim has been fully approved.';
       }
 
-      // If SAP success, use the new decision status
-      // If SAP failed, keep as 'Pending' but update backend to log the error
-      const finalStatus = sapSuccess ? decision : 'Pending';
-      const finalComment = sapSuccess ? comment : `SAP Error: ${sapError}`;
-
-      await updateMasterExpenseStatus(docId, finalStatus, reasonCode, finalComment);
-
-      if (sapSuccess) {
-        Alert.alert('Success', `Claim ${decision.toLowerCase()} successfully`);
-        setModalVisible(false);
-        setSelectedClaim(null);
-        setRejectReason('');
-        setRejectComment('');
-        await fetchClaims(true);
-      } else {
-        // Just log that we saved the error state
-        console.log('Updated status to Pending with SAP error log');
-        // We might want to close the modal anyway or let user try again?
-        // Let's keep modal open if they want to retry, but we already logged the failure.
-        // Actually, typically we close or refresh. Let's refresh to show the log?
-        // User requested "add call the api even error occured... send status as Pending"
-        // so we have done that.
-      }
+      toast.success(body, title);
+      setModalVisible(false);
+      setSelectedClaim(null);
+      setRejectReason('');
+      setRejectComment('');
+      await fetchClaims(true);
     } catch (e) {
       console.error('Decision error', e);
-      Alert.alert('Error', e?.message || 'Failed to process');
+      toast.error(e?.message || 'Failed to process.', 'Action failed');
     } finally {
       setActionLoading(false);
     }

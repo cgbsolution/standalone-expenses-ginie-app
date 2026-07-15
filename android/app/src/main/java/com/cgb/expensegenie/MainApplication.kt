@@ -1,4 +1,4 @@
-package com.tatarealty.expense
+package com.cgb.expensegenie
 
 import android.app.Application
 import android.content.res.Configuration

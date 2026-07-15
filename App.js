@@ -12,6 +12,7 @@ import ChatBotScreen from './screens/ChatBotScreen';
 import DrawerNavigator from './navigation/DrawerNavigator';
 import { InvoiceProvider } from './context/InvoiceContext';
 import { AuthProvider } from './context/AuthContext';
+import { UIHosts } from './components/ui';
 
 enableScreens();
 
@@ -33,6 +34,7 @@ export default function App() {
                 <Stack.Screen name="MasterExpenseScreen" component={MasterExpenseScreen}/>
               </Stack.Navigator>
             </NavigationContainer>
+            <UIHosts />
           </InvoiceProvider>
         </AuthProvider>
       </SafeAreaProvider>

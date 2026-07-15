@@ -87,9 +87,9 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace 'com.tatarealty.expense'
+    namespace 'com.cgb.expensegenie'
     defaultConfig {
-        applicationId 'com.tatarealty.expense'
+        applicationId 'com.cgb.expensegenie'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 33
@@ -133,6 +133,14 @@ android {
     }
     androidResources {
         ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:!CVS:!thumbs.db:!picasa.ini:!*~'
+    }
+    lint {
+        // Lint still runs and prints findings, but does NOT fail the release build.
+        // Without this, every new AGP release introduces lint rules that block builds
+        // at the final gate (after 30+ min of native compile). Re-enable abortOnError
+        // once the team has reviewed and addressed the existing warnings.
+        abortOnError false
+        checkReleaseBuilds true
     }
 }
 

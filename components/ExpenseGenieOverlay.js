@@ -9,7 +9,6 @@ import {
   Platform,
   Animated,
   Image,
-  Alert,
   ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -17,6 +16,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { uploadExpenseDocument } from '../api/expenseUpload';
+import { toast, actionSheet } from './ui';
 
 export default function ExpenseGenieOverlay({ visible, onClose, onSendMessage }) {
   const [message, setMessage] = useState('');
@@ -66,12 +66,19 @@ export default function ExpenseGenieOverlay({ visible, onClose, onSendMessage })
 
   const handleAttach = async () => {
     if (uploading) return;
-    Alert.alert('Attach file', 'Choose source', [
-      { text: 'Camera', onPress: () => pickFromCamera() },
-      { text: 'Gallery', onPress: () => pickFromGallery() },
-      { text: 'Files', onPress: () => pickFromFiles() },
-      { text: 'Cancel', style: 'cancel' },
-    ], { cancelable: true });
+    const pick = await actionSheet({
+      title: 'Attach a file',
+      description: 'Pick a source for your receipt or document.',
+      options: [
+        { label: 'Take a photo', icon: 'camera-outline', value: 'camera' },
+        { label: 'Choose from gallery', icon: 'images-outline', value: 'gallery' },
+        { label: 'Browse files', icon: 'folder-outline', value: 'files' },
+      ],
+    });
+    if (!pick) return;
+    if (pick.value === 'camera') pickFromCamera();
+    else if (pick.value === 'gallery') pickFromGallery();
+    else if (pick.value === 'files') pickFromFiles();
   };
 
   const doUpload = async (uri, name) => {
@@ -80,13 +87,13 @@ export default function ExpenseGenieOverlay({ visible, onClose, onSendMessage })
       const result = await uploadExpenseDocument(uri, name || 'attachment');
       setUploading(false);
       if (result.success) {
-        Alert.alert('Uploaded', 'Your document was submitted.');
+        toast.success('Your document was submitted.', 'Uploaded');
       } else {
-        Alert.alert('Upload failed', result.error || 'Could not upload the file.');
+        toast.error(result.error || 'Could not upload the file.', 'Upload failed');
       }
     } catch (err) {
       setUploading(false);
-      Alert.alert('Upload failed', err.message || 'Unexpected error.');
+      toast.error(err.message || 'Unexpected error.', 'Upload failed');
     }
   };
 
@@ -94,7 +101,7 @@ export default function ExpenseGenieOverlay({ visible, onClose, onSendMessage })
     try {
       const perm = await ImagePicker.requestCameraPermissionsAsync();
       if (!perm.granted) {
-        Alert.alert('Permission required', 'Camera permission is needed.');
+        toast.warning('Camera permission is needed.', 'Permission required');
         return;
       }
       const result = await ImagePicker.launchCameraAsync({
@@ -106,7 +113,7 @@ export default function ExpenseGenieOverlay({ visible, onClose, onSendMessage })
         await doUpload(a.uri, a.fileName || 'camera.jpg');
       }
     } catch (e) {
-      Alert.alert('Error', e.message || 'Could not take photo.');
+      toast.error(e.message || 'Could not take photo.', 'Camera error');
     }
   };
 
@@ -114,7 +121,7 @@ export default function ExpenseGenieOverlay({ visible, onClose, onSendMessage })
     try {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
-        Alert.alert('Permission required', 'Gallery permission is needed.');
+        toast.warning('Gallery permission is needed.', 'Permission required');
         return;
       }
       const result = await ImagePicker.launchImageLibraryAsync({
@@ -126,7 +133,7 @@ export default function ExpenseGenieOverlay({ visible, onClose, onSendMessage })
         await doUpload(a.uri, a.fileName || 'photo.jpg');
       }
     } catch (e) {
-      Alert.alert('Error', e.message || 'Could not pick image.');
+      toast.error(e.message || 'Could not pick image.', 'Gallery error');
     }
   };
 
@@ -141,7 +148,7 @@ export default function ExpenseGenieOverlay({ visible, onClose, onSendMessage })
         await doUpload(a.uri, a.name || 'file');
       }
     } catch (e) {
-      Alert.alert('Error', e.message || 'Could not pick file.');
+      toast.error(e.message || 'Could not pick file.', 'File picker error');
     }
   };
 

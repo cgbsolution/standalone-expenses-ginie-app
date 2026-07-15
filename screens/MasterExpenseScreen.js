@@ -9,7 +9,6 @@ import {
   Modal,
   TextInput,
   Image,
-  Alert,
   ActivityIndicator,
   KeyboardAvoidingView,
   TouchableWithoutFeedback,
@@ -33,6 +32,7 @@ import { GestureHandlerRootView, GestureDetector, Gesture } from 'react-native-g
 import Animated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import { generateApprovalTrailPDF, generateApprovalTrailHTML } from '../utils/pdfUtils';
 import * as Sharing from 'expo-sharing';
+import { toast, confirm } from '../components/ui';
 const API_BASE_URL = BASE_URL;
 const URL = `${BASE_URL}/master-expense/by-id`;
 // SAP integration removed: approvals now flow Manager → Finance Manager via the backend.
@@ -261,11 +261,15 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
     setModalVisible(false);
   };
 
-  const handleDeleteInvoice = (index) => {
-    Alert.alert('Delete Invoice', 'Are you sure?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => deleteInvoice(index) },
-    ]);
+  const handleDeleteInvoice = async (index) => {
+    const ok = await confirm({
+      variant: 'destructive',
+      title: 'Delete this invoice?',
+      message: 'This invoice will be removed from your expense. You can re-add it later.',
+      confirmLabel: 'Delete',
+      cancelLabel: 'Keep',
+    });
+    if (ok) deleteInvoice(index);
   };
 
   const getBase64FromUri = async (uri) => {
@@ -340,7 +344,7 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
 
   const submitMasterExpense = async (status = "Pending") => {
     if (!title || !approverName || invoices.length === 0) {
-      Alert.alert('Missing Fields', 'Please fill all fields and add at least one invoice.');
+      toast.warning('Please fill all fields and add at least one invoice.', 'Missing fields');
       return;
     }
 
@@ -352,12 +356,15 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
       await axios.post(`${API_BASE_URL}/master-expense`, payload, {
         headers: { 'Content-Type': 'application/json' },
       });
-      Alert.alert('Success', `Master expense ${status === 'Draft' ? 'saved as draft' : 'submitted'}!`);
+      toast.success(
+        status === 'Draft' ? 'Your expense was saved as draft.' : 'Your expense was submitted for approval.',
+        status === 'Draft' ? 'Draft saved' : 'Submitted'
+      );
       clearInvoices();
       navigation.navigate('My Claims');
     } catch (err) {
       console.error("Error submitting master expense:", err);
-      Alert.alert('Error', 'Submission failed.');
+      toast.error('We couldn’t submit your expense. Please try again.', 'Submission failed');
     } finally {
       setIsSubmitting(false);
     }
@@ -453,11 +460,9 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
 
       const updated = await updateMasterExpenseStatus(docId, newStatus, reasonCode, comment, null);
 
-      // Backend may have forwarded to finance (status stays 'Pending' with a new approver).
-      // Reflect that in the success message so the user knows what happened.
       const resultingStatus = updated?.ApprovalStatus || newStatus;
-      let title = 'Success';
-      let body = `Claim has been ${newStatus.toLowerCase()} successfully!`;
+      let title = newStatus === 'Approved' ? 'Approved' : 'Rejected';
+      let body = `Claim has been ${newStatus.toLowerCase()} successfully.`;
       if (newStatus === 'Approved' && resultingStatus === 'Pending') {
         title = 'Forwarded to Finance';
         body = 'Your approval has been recorded. The claim is now pending Finance Manager review.';
@@ -466,26 +471,24 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
         body = 'Claim has been fully approved.';
       }
 
-      Alert.alert(title, body, [
-        { text: 'OK', onPress: () => navigation.goBack() },
-      ]);
+      toast.success(body, title);
+      navigation.goBack();
     } catch (e) {
-      Alert.alert('Error', e?.message || "Failed to update status.");
+      toast.error(e?.message || 'Failed to update status.', 'Action failed');
     } finally {
       setIsApproving(false);
       setIsRejecting(false);
     }
   };
 
-  const approveClaim = () => {
-    Alert.alert(
-      'Approve Claim',
-      'Are you sure you want to approve this claim?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Approve', style: 'default', onPress: () => runStatusUpdate("Approved") }
-      ]
-    );
+  const approveClaim = async () => {
+    const ok = await confirm({
+      title: 'Approve this claim?',
+      message: 'Once approved, this claim will be forwarded to the next approver in the chain.',
+      confirmLabel: 'Approve',
+      cancelLabel: 'Cancel',
+    });
+    if (ok) runStatusUpdate('Approved');
   };
 
   const rejectClaim = () => {
@@ -497,36 +500,58 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
     setImageModalVisible(true);
   };
 
+  // Receipts live in a PRIVATE Supabase bucket, so the backend stores each file
+  // as an S3 URI (e.g. "s3://expense_receipt/<folder>/<file>"). Ask the backend
+  // to mint a short-lived HTTPS signed URL we can actually open.
+  const resolveSignedUrl = async (rawPath) => {
+    try {
+      const resp = await fetch(
+        `${API_BASE_URL}/storage/sign?path=${encodeURIComponent(rawPath)}`
+      );
+      if (!resp.ok) {
+        console.warn('[resolveSignedUrl] sign failed:', resp.status);
+        return null;
+      }
+      const data = await resp.json();
+      return data?.url || null;
+    } catch (e) {
+      console.warn('[resolveSignedUrl] error:', e.message);
+      return null;
+    }
+  };
+
   const handleOpenFile = async (fileUrl) => {
     if (!fileUrl) {
-      Alert.alert('Error', 'No file URL available');
+      toast.error('No file URL available.', 'Cannot open file');
       return;
     }
 
-    // The chat backend at 147.93.103.97 stores files locally with a "local://..."
-    // URL scheme that isn't reachable over the public internet. Until the chat
-    // host exposes these via HTTPS, we can't preview or download them.
     if (typeof fileUrl === 'string' && /^local:\/\//i.test(fileUrl)) {
-      Alert.alert(
-        'File not accessible',
-        'This file was uploaded through the chat and is stored privately on the chat server. The chat host needs to expose it via a public HTTPS URL before the app can preview it.'
+      toast.warning(
+        'This file was uploaded through the chat and is stored privately. The chat host needs to expose it via HTTPS before the app can preview it.',
+        'File not accessible'
       );
-      return;
-    }
-
-    // Reject anything that isn't an http(s) URL — Google Docs Viewer needs a public URL.
-    if (typeof fileUrl === 'string' && !/^https?:\/\//i.test(fileUrl)) {
-      Alert.alert('Invalid file URL', 'The file URL is not a valid web address:\n' + fileUrl);
       return;
     }
 
     try {
       setIsPreviewingTrail(true); // Reuse previewing state for file loading spinner
-      let finalUrl = fileUrl;
 
-      // Check file type on the original URL (extension might be missing in SAS signature)
-      const isImage = fileUrl.match(/\.(jpeg|jpg|gif|png)$/i);
-      const isPdf = fileUrl.match(/\.pdf$/i);
+      // Detect type from the ORIGINAL path — signed URLs carry a ?token=... that
+      // hides the extension.
+      const isImage = /\.(jpeg|jpg|gif|png)(\?|$)/i.test(fileUrl);
+      const isPdf = /\.pdf(\?|$)/i.test(fileUrl);
+
+      // Resolve to an openable HTTPS URL. s3:// (and any non-http) values go
+      // through the backend signer; real https URLs pass straight through.
+      let finalUrl = fileUrl;
+      if (!/^https?:\/\//i.test(fileUrl)) {
+        finalUrl = await resolveSignedUrl(fileUrl);
+        if (!finalUrl) {
+          toast.error('Could not get a link to this file. Please try again.', 'Open failed');
+          return;
+        }
+      }
 
       if (isImage) {
         openImagePreview(finalUrl);
@@ -536,15 +561,14 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
         setDocumentUri(googleDocsUrl);
         setDocumentModalVisible(true);
       } else {
-        // Open other files in browser/external app
         Linking.openURL(finalUrl).catch(err => {
           console.error('Failed to open URL:', err);
-          Alert.alert('Error', 'Could not open file');
+          toast.error('Could not open file.', 'Open failed');
         });
       }
     } catch (e) {
       console.error("Error opening file:", e);
-      Alert.alert('Error', 'Failed to open file');
+      toast.error('Failed to open file.', 'Open failed');
     } finally {
       setIsPreviewingTrail(false);
     }
@@ -573,7 +597,7 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
       setDocumentModalVisible(true);
     } catch (err) {
       console.error('Error rendering approval trail:', err);
-      Alert.alert('Error', 'Failed to render approval trail.');
+      toast.error('Failed to render approval trail.', 'Preview failed');
     } finally {
       setIsPreviewingTrail(false);
     }
@@ -615,11 +639,11 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
           UTI: 'com.adobe.pdf'
         });
       } else {
-        Alert.alert('Sharing Not Available', 'File sharing is not supported on this device.');
+        toast.warning('File sharing is not supported on this device.', 'Sharing not available');
       }
     } catch (err) {
       console.error('Error sharing approval trail PDF:', err);
-      Alert.alert('Error', 'Failed to generate or share PDF.');
+      toast.error('Failed to generate or share PDF.', 'PDF failed');
     } finally {
       setIsPreviewingTrail(false);
     }

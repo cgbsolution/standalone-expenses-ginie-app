@@ -9,7 +9,6 @@ import {
   KeyboardAvoidingView,
   Platform,
   StatusBar,
-  Alert,
   ActivityIndicator,
   ScrollView,
 } from 'react-native';
@@ -18,6 +17,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import genieLogo from '../assets/iconginie1.png';
 import googleLogo from '../assets/google.png';
+import { toast } from '../components/ui';
 
 function MicrosoftSquaresLogo({ size = 18 }) {
   const cell = (size - 2) / 2;
@@ -55,7 +55,7 @@ export default function PhoneAuthScreen({ navigation }) {
 
   const handleEmailLogin = async () => {
     if (!email.trim() || !password) {
-      Alert.alert('Missing details', 'Enter an email and password.');
+      toast.warning('Enter an email and password.', 'Missing details');
       return;
     }
     clearError();
@@ -63,7 +63,7 @@ export default function PhoneAuthScreen({ navigation }) {
     if (result.success) {
       navigation.replace('Main');
     } else {
-      Alert.alert('Sign-in failed', result.error || 'Invalid email or password.');
+      toast.error(result.error || 'Invalid email or password.', 'Sign-in failed');
     }
   };
 
@@ -73,7 +73,7 @@ export default function PhoneAuthScreen({ navigation }) {
     if (result.success) {
       navigation.replace('Main');
     } else if (!result.cancelled) {
-      Alert.alert('Microsoft sign-in failed', result.error || 'Please try again.');
+      toast.error(result.error || 'Please try again.', 'Microsoft sign-in failed');
     }
   };
 
@@ -83,7 +83,7 @@ export default function PhoneAuthScreen({ navigation }) {
     if (result.success) {
       navigation.replace('Main');
     } else {
-      Alert.alert('Google sign-in', result.error || 'Could not sign in with Google.');
+      toast.error(result.error || 'Could not sign in with Google.', 'Google sign-in');
     }
   };
 

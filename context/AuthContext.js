@@ -200,6 +200,34 @@ export const AuthProvider = ({ children }) => {
     setError(null);
   };
 
+  // Merge partial fields into the current user and persist to the right store
+  // (local-email session vs Microsoft profile) so the change survives app restart
+  // and is reflected everywhere that reads `user`.
+  const updateLocalUser = async (partial) => {
+    if (!partial || typeof partial !== 'object') return user;
+    let merged = null;
+    setUser((prev) => {
+      merged = { ...(prev || {}), ...partial };
+      return merged;
+    });
+    try {
+      const stored = await AsyncStorage.getItem(LOCAL_USER_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        await AsyncStorage.setItem(
+          LOCAL_USER_KEY,
+          JSON.stringify({ ...parsed, ...partial })
+        );
+      } else if (merged) {
+        // Microsoft session — persist via the MS profile store.
+        await MicrosoftAuthService.storeUserProfile(merged);
+      }
+    } catch (e) {
+      console.error('updateLocalUser persist error:', e);
+    }
+    return merged;
+  };
+
   const refreshAuth = async () => {
     try {
       setIsLoading(true);
@@ -237,7 +265,8 @@ export const AuthProvider = ({ children }) => {
     signOut,
     clearError,
     refreshAuth,
-    
+    updateLocalUser,
+
     // Utilities
     isMicrosoftUser: user?.authProvider !== 'email',
     isEmailUser: user?.authProvider === 'email',

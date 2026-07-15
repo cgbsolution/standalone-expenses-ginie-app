@@ -8,7 +8,6 @@ import {
   ScrollView,
   Modal,
   Pressable,
-  Alert,
   ActivityIndicator,
   Image,
   Platform,
@@ -23,6 +22,7 @@ import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { File, Paths } from "expo-file-system";
 import TopBar from "../components/TopBar";
+import { toast } from "../components/ui";
 import { SafeAreaView } from "react-native-safe-area-context";
 // Removed multi-bill master view flow
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -251,7 +251,7 @@ export default function EditExpenseScreen({ navigation }) {
     const perm = fromCamera
       ? await ImagePicker.requestCameraPermissionsAsync()
       : await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (perm.status !== "granted") return Alert.alert("Permission required");
+    if (perm.status !== "granted") return toast.warning('Please grant camera/gallery access to upload a bill.', 'Permission required');
 
     const result = fromCamera
       ? await ImagePicker.launchCameraAsync({ quality: 1 })
@@ -302,7 +302,7 @@ export default function EditExpenseScreen({ navigation }) {
       }
     } catch (error) {
       console.error("Error picking PDF:", error);
-      Alert.alert("Error", "Failed to pick PDF file");
+      toast.error('Failed to pick PDF file.', 'Picker error');
     }
   };
 
@@ -322,10 +322,7 @@ export default function EditExpenseScreen({ navigation }) {
           console.log("base64Image length:", base64Image.length);
         } catch (error) {
           console.error("Error reading file:", error);
-          Alert.alert(
-            "Error",
-            "Failed to read the selected file. Please try again."
-          );
+          toast.error('Failed to read the selected file. Please try again.', 'Read failed');
           setLoading(false);
           return;
         }
@@ -414,7 +411,7 @@ export default function EditExpenseScreen({ navigation }) {
       //Alert.alert("Budget Check Result", JSON.stringify(result, null, 2));
     } catch (err) {
       console.error("Budget Check Error:", err);
-      Alert.alert("Budget Check Error", err.message);
+      toast.error(err.message || 'Budget check failed.', 'Budget check error');
     } finally {
       setLoading(false);
     }
@@ -422,7 +419,7 @@ export default function EditExpenseScreen({ navigation }) {
 
   // OCR API
   const handleUpload = async () => {
-    if (!selectedFile) return Alert.alert("No file selected");
+    if (!selectedFile) return toast.warning('Please select a file first.', 'No file selected');
 
     try {
       setLoading(true);
@@ -493,7 +490,7 @@ export default function EditExpenseScreen({ navigation }) {
         !Array.isArray(json.ExpenseData) ||
         json.ExpenseData.length === 0
       ) {
-        Alert.alert("Error", "Invalid response format from OCR service");
+        toast.error('Invalid response format from OCR service.', 'OCR error');
         return;
       }
 
@@ -526,11 +523,11 @@ export default function EditExpenseScreen({ navigation }) {
         narration: expense.Narration,
       });
 
-      Alert.alert("Success", "Expense details auto-filled from OCR!");
+      toast.success('Expense details auto-filled from OCR.', 'Ready to review');
     } catch (e) {
       console.error("Process Expense Error:", e);
       setUploadStatus("failed");
-      Alert.alert("Error", e.message);
+      toast.error(e.message || 'Something went wrong.', 'OCR error');
     } finally {
       setLoading(false);
       hideProgress();
@@ -560,14 +557,14 @@ export default function EditExpenseScreen({ navigation }) {
       // Basic validations
       if (expenseType === "Bill-Based") {
         if (!selectedFile) {
-          Alert.alert("Missing Bill", "Please upload a bill image or PDF.");
+          toast.warning('Please upload a bill image or PDF.', 'Missing bill');
           setLoading(false);
           hideProgress();
           return;
         }
       } else {
         if (!claimAmount) {
-          Alert.alert("Missing Amount", "Please enter the amount.");
+          toast.warning('Please enter the amount.', 'Missing amount');
           setLoading(false);
           hideProgress();
           return;
@@ -780,9 +777,11 @@ export default function EditExpenseScreen({ navigation }) {
       }
       logProgress('Expense saved');
 
-      Alert.alert("Success", status === 'Draft' ? "Saved as draft" : "Submitted successfully", [
-        { text: "OK", onPress: () => navigation.goBack() },
-      ]);
+      toast.success(
+        status === 'Draft' ? 'Your expense was saved as draft.' : 'Submitted successfully.',
+        status === 'Draft' ? 'Draft saved' : 'Submitted'
+      );
+      navigation.goBack();
 
       // Reset form after submission
       setExpenseType("Bill-Based");
@@ -810,7 +809,7 @@ export default function EditExpenseScreen({ navigation }) {
       setShowConveyanceDetails(false);
     } catch (e) {
       console.error("Single expense submission error:", e);
-      Alert.alert("Error", e.message || "Submission failed");
+      toast.error(e.message || 'Submission failed.', 'Submit failed');
     } finally {
       setLoading(false);
       hideProgress();

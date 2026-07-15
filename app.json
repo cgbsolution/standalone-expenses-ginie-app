@@ -1,10 +1,10 @@
 {
   "expo": {
-    "name": "Expense Test",
-    "slug": "expense-test",
+    "name": "CGB Expense Genie",
+    "slug": "cgb-expense-genie",
     "version": "1.0.0",
     "orientation": "portrait",
-    "scheme": "expense-test",
+    "scheme": "cgbexpensegenie",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "icon": "./assets/iconginie.png",
@@ -15,7 +15,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.tatarealty.expense.test",
+      "bundleIdentifier": "com.cgb.expensegenie",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSCameraUsageDescription": "This app needs camera access to capture expense bills and to share video in the chat.",
@@ -37,7 +37,7 @@
     },
     "android": {
       "edgeToEdgeEnabled": true,
-      "package": "com.tatarealty.expense",
+      "package": "com.cgb.expensegenie",
       "adaptiveIcon": {
         "foregroundImage": "./assets/iconginie.png",
         "backgroundColor": "#ffffff"

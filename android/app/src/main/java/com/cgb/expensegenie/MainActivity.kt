@@ -1,4 +1,4 @@
-package com.tatarealty.expense
+package com.cgb.expensegenie
 import expo.modules.splashscreen.SplashScreenManager
 
 import android.os.Build

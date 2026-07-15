@@ -11,13 +11,13 @@ import {
   ActivityIndicator,
   TouchableOpacity,
   Platform,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
+import { toast, actionSheet } from './ui';
 import { useAuth } from '../context/AuthContext';
 import { buildChatUrl } from '../config/expgenie';
 import { uploadExpenseDocument } from '../api/expenseUpload';
@@ -117,6 +117,60 @@ function buildInjectedJs() {
           '</div>';
         }
 
+        // --- Drive the chat host's OWN file uploader --------------------------
+        // Clicking a real <input type=file> (or the host's attach button) makes
+        // react-native-webview open the native picker; the chosen / captured file
+        // is then sent as a genuine chat message — it shows in the thread and the
+        // bot processes it. This replaces the old side-channel REST upload that
+        // never appeared in the conversation.
+        function findHostFileInput(doc) {
+          try {
+            var inputs = doc.querySelectorAll('input[type="file"]');
+            for (var i = inputs.length - 1; i >= 0; i--) {
+              if (inputs[i].closest && inputs[i].closest('.expgenie-welcome')) continue;
+              return inputs[i];
+            }
+          } catch (e) {}
+          return null;
+        }
+        function findHostAttachButton(doc) {
+          try {
+            var sel = '[aria-label*="attach" i],[aria-label*="upload" i],[aria-label*="file" i],' +
+                      '[title*="attach" i],[title*="upload" i],[data-testid*="attach" i],' +
+                      '[class*="attach" i],[class*="upload" i],[class*="paperclip" i]';
+            var els = doc.querySelectorAll(sel);
+            for (var i = 0; i < els.length; i++) {
+              if (els[i].closest && els[i].closest('.expgenie-welcome')) continue;
+              return els[i];
+            }
+          } catch (e) {}
+          return null;
+        }
+        function triggerHostUpload() {
+          // Search the top document first, then any same-origin iframes.
+          var docs = [document];
+          try {
+            var frames = document.querySelectorAll('iframe');
+            for (var i = 0; i < frames.length; i++) {
+              try { if (frames[i].contentDocument) docs.push(frames[i].contentDocument); } catch (e) {}
+            }
+          } catch (e) {}
+
+          for (var d = 0; d < docs.length; d++) {
+            var input = findHostFileInput(docs[d]);
+            if (input) { try { input.click(); return; } catch (e) {} }
+          }
+          for (var d2 = 0; d2 < docs.length; d2++) {
+            var attach = findHostAttachButton(docs[d2]);
+            if (attach) { try { attach.click(); return; } catch (e) {} }
+          }
+          // Couldn't reach the host uploader (e.g. a cross-origin chat frame) —
+          // fall back to the native picker + REST upload on the RN side.
+          if (window.ReactNativeWebView) {
+            window.ReactNativeWebView.postMessage('expgenie-upload');
+          }
+        }
+
         // Pick the LARGEST element on the page with overflow-y: auto/scroll.
         // That's almost always the messages container — the one that scrolls
         // independently of the page. Inserting our welcome card as its first
@@ -158,14 +212,12 @@ function buildInjectedJs() {
           var card = temp.firstChild;
           container.insertBefore(card, container.firstChild);
 
-          // Wire orange button → React Native side
+          // Wire orange button → drive the chat host's OWN uploader so the file
+          // is sent as a real chat message. Falls back to the native picker only
+          // if the host's upload control can't be reached.
           var btn = card.querySelector('button.upload');
           if (btn) {
-            btn.addEventListener('click', function() {
-              if (window.ReactNativeWebView) {
-                window.ReactNativeWebView.postMessage('expgenie-upload');
-              }
-            });
+            btn.addEventListener('click', function() { triggerHostUpload(); });
           }
           return true;
         }
@@ -235,13 +287,13 @@ export default function ExpenseChatWebView() {
       if (!file) return;
       const r = await uploadExpenseDocument(file.uri, file.name || 'expense');
       if (r.success) {
-        Alert.alert('Uploaded', 'Your expense document was submitted.');
+        toast.success('Your expense document was submitted.', 'Uploaded');
         webViewRef.current?.reload();
       } else {
-        Alert.alert('Upload failed', r.error || 'Could not upload the file.');
+        toast.error(r.error || 'Could not upload the file.', 'Upload failed');
       }
     } catch (err) {
-      Alert.alert('Upload failed', err.message || 'Unexpected error.');
+      toast.error(err.message || 'Unexpected error.', 'Upload failed');
     }
   };
 
@@ -251,12 +303,23 @@ export default function ExpenseChatWebView() {
     if (Platform.OS !== 'android') return true;
     const { capture } = event.nativeEvent;
     fileUploadCaptureRef.current = capture;
-    Alert.alert('Select File', 'Choose source', [
-      { text: 'Camera', onPress: () => pickFromCamera() },
-      { text: 'Gallery', onPress: () => pickFromGallery() },
-      { text: 'Files', onPress: () => pickFromFiles() },
-      { text: 'Cancel', style: 'cancel', onPress: () => { fileUploadCaptureRef.current?.(null); fileUploadCaptureRef.current = null; } },
-    ]);
+    const pick = await actionSheet({
+      title: 'Upload a receipt',
+      description: 'Pick a source for your receipt or document.',
+      options: [
+        { label: 'Take a photo', icon: 'camera-outline', value: 'camera' },
+        { label: 'Choose from gallery', icon: 'images-outline', value: 'gallery' },
+        { label: 'Browse files', icon: 'folder-outline', value: 'files' },
+      ],
+    });
+    if (!pick) {
+      fileUploadCaptureRef.current?.(null);
+      fileUploadCaptureRef.current = null;
+      return true;
+    }
+    if (pick.value === 'camera') pickFromCamera();
+    else if (pick.value === 'gallery') pickFromGallery();
+    else if (pick.value === 'files') pickFromFiles();
     return true;
   };
   const feedFile = (asset) => {

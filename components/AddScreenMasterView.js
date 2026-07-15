@@ -6,7 +6,6 @@ import {
   ScrollView,
   TouchableOpacity,
   Image,
-  Alert,
   ActivityIndicator,
   Modal,
   TextInput,
@@ -15,18 +14,23 @@ import {
 } from 'react-native';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { useInvoiceContext } from '../context/InvoiceContext';
+import { useAuth } from '../context/AuthContext';
 import axios from 'axios';
 import * as FileSystem from 'expo-file-system';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL } from '@env';
+import { toast, confirm } from './ui';
 
 const API_BASE_URL = BASE_URL;
-const SUBMITTER_EMAIL = 'ankurmaheshwari@tatarealty.in';
-const APPROVER_EMAIL = 'tarunmehrotra@tatarealty.in';
 
 export default function AddScreenMasterView({ navigation, onAddMoreBills }) {
   const { invoices, deleteInvoice, updateInvoice, clearInvoices } = useInvoiceContext();
+  const { user } = useAuth();
+  const submitterEmail =
+    user?.email || user?.mail || user?.userPrincipalName || '';
+  // TODO: wire approver selection to a real UI/lookup; backend should reject empty.
+  const approverEmail = '';
 
   const [title, setTitle] = useState('My Expenses');
   const [approverName, setApproverName] = useState('User');
@@ -40,27 +44,16 @@ export default function AddScreenMasterView({ navigation, onAddMoreBills }) {
   // Check title and prompt user if empty when invoices are added
   useEffect(() => {
     if (invoices.length > 0 && !hasCheckedTitle) {
-      // Give a small delay to ensure title is loaded
-      const timer = setTimeout(() => {
+      const timer = setTimeout(async () => {
         if (!title || title === 'My Expenses') {
-          Alert.alert(
-            'Add Expense Title',
-            'Please give your expense a title (e.g., "Delhi Trip - October 2024")',
-            [
-              {
-                text: 'Cancel',
-                style: 'cancel',
-                onPress: () => setHasCheckedTitle(true)
-              },
-              {
-                text: 'Add Title',
-                onPress: () => {
-                  setHasCheckedTitle(true);
-                  handleOpenTitleEdit();
-                }
-              }
-            ]
-          );
+          const wantsToAdd = await confirm({
+            title: 'Add an expense title',
+            message: 'Give this expense a title so you can find it later — e.g. "Delhi Trip — October 2024".',
+            confirmLabel: 'Add Title',
+            cancelLabel: 'Not now',
+          });
+          setHasCheckedTitle(true);
+          if (wantsToAdd) handleOpenTitleEdit();
         } else {
           setHasCheckedTitle(true);
         }
@@ -162,11 +155,15 @@ export default function AddScreenMasterView({ navigation, onAddMoreBills }) {
     }, 0);
   }, [invoices]);
 
-  const handleDeleteInvoice = (index) => {
-    Alert.alert('Delete Invoice', 'Are you sure?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => deleteInvoice(index) },
-    ]);
+  const handleDeleteInvoice = async (index) => {
+    const ok = await confirm({
+      variant: 'destructive',
+      title: 'Delete this invoice?',
+      message: 'This invoice will be removed from your expense. You can re-add it later.',
+      confirmLabel: 'Delete',
+      cancelLabel: 'Keep',
+    });
+    if (ok) deleteInvoice(index);
   };
 
   const openMediaPreview = (uri, fileType) => {
@@ -288,8 +285,8 @@ export default function AddScreenMasterView({ navigation, onAddMoreBills }) {
     return {
       ExpenseTitle: title,
       ExpenseId: "",
-      ApproverEmail: APPROVER_EMAIL,
-      SubmitterEmail: SUBMITTER_EMAIL,
+      ApproverEmail: approverEmail,
+      SubmitterEmail: submitterEmail,
       ExpenseFromDate: fromDate.toISOString().split('T')[0],
       ExpenseToDate: toDate.toISOString().split('T')[0],
       ApprovalStatus: status,
@@ -299,25 +296,20 @@ export default function AddScreenMasterView({ navigation, onAddMoreBills }) {
   };
 
   const submitMasterExpense = async (status = "Pending") => {
-    // Validate invoice count first
     if (invoices.length === 0) {
-      Alert.alert('Missing Invoices', 'Please add at least one invoice.');
+      toast.warning('Add at least one invoice before submitting.', 'No invoices yet');
       return;
     }
 
-    // Check if title is set and valid
     if (!title || title === 'My Expenses' || title.trim() === '') {
-      Alert.alert(
-        'Title Required',
-        'Please add a title for your expense before submitting. This will help identify your expense later.',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Add Title',
-            onPress: () => handleOpenTitleEdit()
-          }
-        ]
-      );
+      const wantsToAdd = await confirm({
+        variant: 'warning',
+        title: 'Title required',
+        message: 'Add a title for this expense before submitting so you can find it later.',
+        confirmLabel: 'Add Title',
+        cancelLabel: 'Cancel',
+      });
+      if (wantsToAdd) handleOpenTitleEdit();
       return;
     }
 
@@ -346,22 +338,14 @@ export default function AddScreenMasterView({ navigation, onAddMoreBills }) {
         console.error('Error clearing title:', err);
       }
 
-      Alert.alert(
-        'Success',
-        `Master expense ${status === 'Draft' ? 'saved as draft' : 'submitted'}!`,
-        [
-          {
-            text: 'OK',
-            onPress: () => {
-              // Navigate back to add screen or show success message
-              onAddMoreBills();
-            }
-          }
-        ]
+      toast.success(
+        status === 'Draft' ? 'Your expense was saved as draft.' : 'Your expense was submitted for approval.',
+        status === 'Draft' ? 'Draft saved' : 'Submitted'
       );
+      onAddMoreBills();
     } catch (err) {
       console.error("Error submitting master expense:", err);
-      Alert.alert('Error', 'Submission failed. Please try again.');
+      toast.error('We couldn’t submit your expense. Please try again.', 'Submission failed');
     } finally {
       setIsSubmitting(false);
     }

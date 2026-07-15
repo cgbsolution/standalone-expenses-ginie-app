@@ -2,8 +2,8 @@
 <network-security-config>
     <!-- Trust the self-signed cert shipped in res/raw/chat_host.pem,
          only for the chat host at 147.93.103.97. -->
-    <domain-config includeSubdomains="true">
-        <domain>147.93.103.97</domain>
+    <domain-config>
+        <domain includeSubdomains="false">147.93.103.97</domain>
         <trust-anchors>
             <certificates src="@raw/chat_host"/>
             <certificates src="system"/>
