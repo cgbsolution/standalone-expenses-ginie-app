@@ -18,55 +18,24 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL } from '@env';
+import { useAuth } from '../context/AuthContext';
+import { getTenantSlug, getTenantPaymentSettings, paymentLabel } from '../api/payments';
 
 const API_URL = `${BASE_URL}/master-expense`;
-const SAP_CHECK_STATUS_API =
-  'https://magicqa.tatahousing.com/Magicxpi4.13/MgWebRequester.dll?appname=IFSEMS_To_SAP&prgname=HTTP&arguments=-AHTTP_1%23Check_Status';
 
-// Module-level cache so all expense cards share results
-const sapStatusCache = new Map();
-const sapInflight = new Map();
+// NOTE: this screen used to POST every expense to a hard-coded Tata Housing
+// SAP endpoint to read a "Sap Status". That host belongs to one specific
+// customer, so for every other tenant it leaked bill data to a third party and
+// always rendered "N/A". Payment state now comes from the expense itself
+// (PaymentStatus / PaymentInfo, set by Finance) and from the tenant's own SAP
+// integration flag. If a per-tenant SAP status endpoint is added later, wire it
+// in behind `settings.sapConnected`.
 
-async function fetchSapStatusForExpense(item) {
-  const exp0 = item.ExpenseData?.[0];
-  const itemData = exp0?.ItemData;
-  const documentNumber = itemData?.DocumentNo;
-  if (!documentNumber) return null;
-
-  if (sapStatusCache.has(documentNumber)) return sapStatusCache.get(documentNumber);
-  if (sapInflight.has(documentNumber)) return sapInflight.get(documentNumber);
-
-  const payload = {
-    ExpenseDatas: {
-      EMSUniqueId: String(exp0?.EMSUniqueId || ''),
-      BillNumber: String(exp0?.BillNumber || ''),
-      CompanyCode: String(exp0?.CompanyCode || ''),
-      DocumentNumber: String(documentNumber),
-      FinancialYear: String(itemData?.FinancialYear || ''),
-    },
-  };
-
-  const promise = (async () => {
-    try {
-      const resp = await fetch(SAP_CHECK_STATUS_API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const text = await resp.text();
-      let data = null;
-      try { data = JSON.parse(text); } catch (_) { data = null; }
-      const result = data?.ExpenseDatas || null;
-      sapStatusCache.set(documentNumber, result);
-      return result;
-    } finally {
-      sapInflight.delete(documentNumber);
-    }
-  })();
-
-  sapInflight.set(documentNumber, promise);
-  return promise;
-}
+const paymentToneColors = {
+  paid: '#16A34A',
+  pending: '#B45309',
+  muted: '#6B7280',
+};
 
 const formatRs = (val) => {
   const num = Number(val);
@@ -129,37 +98,11 @@ const StatusTabs = ({ selected, onSelect }) => {
   );
 };
 
-const ExpenseCard = ({ item, onView, onEdit, onDelete }) => {
+const ExpenseCard = ({ item, onView, onEdit, onDelete, paySettings }) => {
   const statusKey = (item.ApprovalStatus || '').toLowerCase();
   const badgeColor = statusColors[statusKey] || '#374151';
 
-  const documentNo = item.ExpenseData?.[0]?.ItemData?.DocumentNo;
-  const [sapStatus, setSapStatus] = useState(() => sapStatusCache.get(documentNo) || null);
-  const [isFetchingSap, setIsFetchingSap] = useState(false);
-
-  useEffect(() => {
-    if (!documentNo) {
-      setSapStatus(null);
-      return;
-    }
-    if (sapStatusCache.has(documentNo)) {
-      setSapStatus(sapStatusCache.get(documentNo));
-      return;
-    }
-    let cancelled = false;
-    setIsFetchingSap(true);
-    fetchSapStatusForExpense(item)
-      .then((res) => { if (!cancelled) setSapStatus(res); })
-      .catch(() => {})
-      .finally(() => { if (!cancelled) setIsFetchingSap(false); });
-    return () => { cancelled = true; };
-  }, [documentNo]);
-
-  const sapStatusText = !documentNo
-    ? 'N/A'
-    : isFetchingSap
-      ? 'Loading...'
-      : (sapStatus?.Status && String(sapStatus.Status).trim() !== '' ? sapStatus.Status : 'N/A');
+  const payment = paymentLabel(item, paySettings);
 
   const isDraft = statusKey === 'draft';
   const isApproved = statusKey === 'approved';
@@ -175,10 +118,15 @@ const ExpenseCard = ({ item, onView, onEdit, onDelete }) => {
           <Text style={styles.cardSub}>Approver : {item.ApproverEmail || 'N/A'}</Text>
         )}
         <Text style={styles.cardSub}>Document No: {item.ExpenseData?.[0]?.ItemData?.DocumentNo || 'N/A'}</Text>
-        <Text style={styles.cardSub}>Sap Status: {sapStatusText}</Text>
+        <Text style={styles.cardSub}>
+          Payment:{' '}
+          <Text style={{ color: paymentToneColors[payment.tone], fontWeight: '600' }}>
+            {payment.text}
+          </Text>
+        </Text>
         {item.SubmissionDate && (
           <Text style={styles.cardSub}>
-            Claim Date : {new Date(item.SubmissionDate).toLocaleDateString('en-GB')}
+            Submission Date : {new Date(item.SubmissionDate).toLocaleDateString('en-GB')}
           </Text>
         )}
       </View>
@@ -225,7 +173,9 @@ export default function MyClaimsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [userEmail, setUserEmail] = useState(null);
+  const [paySettings, setPaySettings] = useState(null);
   const navigation = useNavigation();
+  const { user } = useAuth();
 
   useEffect(() => {
     (async () => {
@@ -237,6 +187,17 @@ export default function MyClaimsScreen() {
       }
     })();
   }, []);
+
+  // Decides whether payment reads "Handled by SAP" or a manual Paid/Awaiting.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const slug = await getTenantSlug(user);
+      const settings = await getTenantPaymentSettings(slug);
+      if (!cancelled) setPaySettings(settings);
+    })();
+    return () => { cancelled = true; };
+  }, [user]);
 
   const fetchExpenses = useCallback(async () => {
     if (!userEmail) return;
@@ -320,6 +281,7 @@ export default function MyClaimsScreen() {
                 <ExpenseCard
                   key={item.id}
                   item={item}
+                  paySettings={paySettings}
                   onView={() => handleView(item)}
                   onEdit={() => handleEdit(item)}
                   onDelete={() => handleDelete(item)}

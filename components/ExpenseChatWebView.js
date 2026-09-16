@@ -56,10 +56,21 @@ function buildInjectedJs() {
         function killTopBar() {
           try {
             var nodes = document.querySelectorAll('header, nav, div, section, aside');
+            var vw = window.innerWidth || 320;
+            // Chat content lives inside the scrollable messages container —
+            // NEVER hide anything in there (bubbles, typing indicator, etc).
+            var msgContainer = null;
+            try { msgContainer = findMessagesContainer(); } catch (e) {}
+
             for (var i = 0; i < nodes.length; i++) {
               var el = nodes[i];
               // Don't touch our own welcome card or anything inside it.
               if (el.closest && el.closest('.expgenie-welcome')) continue;
+              // HARD GUARD: never hide anything inside the messages area —
+              // bubbles, typing indicator, cards. Applies to every rule below,
+              // including the text rule (a user could literally type
+              // "Expense Bot" in a message).
+              if (msgContainer && msgContainer !== document.body && msgContainer.contains(el)) continue;
 
               var t = (el.textContent || '').trim();
               // Direct "Expense Bot" element — short, distinctive text.
@@ -68,10 +79,18 @@ function buildInjectedJs() {
                 continue;
               }
 
-              // Short blue bar anywhere on the page (post-welcome-card position is fine).
+              // Geometric rule: ONLY a real top bar — pinned to the very top of
+              // the viewport and spanning (nearly) the full width. The old
+              // "any short wide blue element" version also matched long blue
+              // chat bubbles and the typing indicator, silently hiding them.
               var rect;
               try { rect = el.getBoundingClientRect(); } catch (e) { continue; }
-              if (rect.height > 0 && rect.height < 70 && rect.width > 200 && looksBlue(el)) {
+              if (
+                rect.top <= 2 &&
+                rect.height > 0 && rect.height < 70 &&
+                rect.width >= vw * 0.9 &&
+                looksBlue(el)
+              ) {
                 el.style.setProperty('display', 'none', 'important');
               }
             }
@@ -228,6 +247,66 @@ function buildInjectedJs() {
           setTimeout(insertWelcomeCard, 600);
           setTimeout(insertWelcomeCard, 1200);
           setTimeout(insertWelcomeCard, 2500);
+        }
+
+        // ---- Safety-net typing indicator --------------------------------------
+        // The chat host only shows "…" when the SERVER pushes a {"type":"typing"}
+        // websocket event, and its file-upload path (the longest wait — OCR) shows
+        // nothing at all. So: the moment a user message appears, WE append a
+        // typing bubble (reusing the host's own .msg.typing styling), and remove
+        // it as soon as the bot's reply / card / native indicator arrives.
+        function setupTypingFallback() {
+          if (window.__expgenieTypingHooked) return true; // script runs twice (pre+post load)
+          var messages = document.getElementById('messages');
+          if (!messages) return false;
+          window.__expgenieTypingHooked = true;
+
+          var mine = null;
+          var failsafe = null;
+
+          function show() {
+            if (document.querySelector('#messages .msg.typing')) return; // host already shows one
+            mine = document.createElement('div');
+            mine.className = 'msg typing';
+            mine.textContent = '…';
+            messages.appendChild(mine);
+            messages.scrollTop = messages.scrollHeight;
+            clearTimeout(failsafe);
+            failsafe = setTimeout(hide, 90000); // never stuck forever
+          }
+          function hide() {
+            clearTimeout(failsafe); failsafe = null;
+            if (mine && mine.parentNode) mine.parentNode.removeChild(mine);
+            mine = null;
+          }
+
+          // Pure DOM reaction — covers every send path (text, card-button taps,
+          // and attachments, which all append a .msg.user first).
+          try {
+            var mo = new MutationObserver(function (muts) {
+              for (var i = 0; i < muts.length; i++) {
+                var added = muts[i].addedNodes;
+                for (var j = 0; j < added.length; j++) {
+                  var n = added[j];
+                  if (!n || n.nodeType !== 1 || n === mine) continue;
+                  var cl = n.classList;
+                  if (!cl || !cl.contains) continue;
+                  if (cl.contains('msg') && cl.contains('user')) {
+                    show(); // user just sent something → waiting on the bot
+                  } else if (cl.contains('card') || (cl.contains('msg') && (cl.contains('bot') || cl.contains('typing')))) {
+                    hide(); // reply arrived, or host's own indicator took over
+                  }
+                }
+              }
+            });
+            mo.observe(messages, { childList: true });
+          } catch (e) {}
+          return true;
+        }
+        if (!setupTypingFallback()) {
+          setTimeout(setupTypingFallback, 300);
+          setTimeout(setupTypingFallback, 1000);
+          setTimeout(setupTypingFallback, 2500);
         }
 
       } catch (e) { /* swallow */ }

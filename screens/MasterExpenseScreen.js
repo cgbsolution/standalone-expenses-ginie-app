@@ -33,6 +33,8 @@ import Animated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-na
 import { generateApprovalTrailPDF, generateApprovalTrailHTML } from '../utils/pdfUtils';
 import * as Sharing from 'expo-sharing';
 import { toast, confirm } from '../components/ui';
+import { getTenantSlug, getTenantPaymentSettings, paymentLabel, isPaid } from '../api/payments';
+import { EXPGENIE_CONFIG } from '../config/expgenie';
 const API_BASE_URL = BASE_URL;
 const URL = `${BASE_URL}/master-expense/by-id`;
 // SAP integration removed: approvals now flow Manager → Finance Manager via the backend.
@@ -132,6 +134,18 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
   // Email addresses from AsyncStorage
   const [submitterEmail, setSubmitterEmail] = useState(null);
   const [approverEmail, setApproverEmail] = useState(null);
+
+  // Whether payment for this tenant comes from SAP or is recorded by Finance.
+  const [paySettings, setPaySettings] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const slug = await getTenantSlug(user);
+      const settings = await getTenantPaymentSettings(slug);
+      if (!cancelled) setPaySettings(settings);
+    })();
+    return () => { cancelled = true; };
+  }, [user]);
 
   // Get expenses for display
   const allExpenses = useMemo(() => {
@@ -307,20 +321,25 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
           Currency: inv.currency || "INR",
           BillNumber: inv.billNumber,
           EMSUniqueId: `ems-${Date.now()}-${i}`,
-          VendorCode: inv.vendorCode || "vendor-001",
-          BusinessPlace: inv.businessPlace || "test-LOC",
-          SectionCode: inv.sectionCode || "test-SC",
+          // SAP posting fields come from the invoice/employee record. These
+          // previously fell back to test placeholders ("vendor-001", "test-LOC",
+          // "Test-CC", …) that were written into real expenses; empty is the
+          // honest value when a code isn't known.
+          VendorCode: inv.vendorCode || "",
+          BusinessPlace: inv.businessPlace || "",
+          SectionCode: inv.sectionCode || "",
           Narration: inv.description,
           InvoiceAmount: parseFloat(inv.billAmount) || 0,
           SelfApprove: false,
           ItemData: {
-            GLCode: inv.glCode || "test-40503021",
-            TaxCode: inv.taxCode || "G0",
-            CostCenter: inv.costCenter || "Test-CC",
-            WBS: inv.wbs || "Test-WBS",
+            GLCode: inv.glCode || "",
+            TaxCode: inv.taxCode || "",
+            CostCenter: inv.costCenter || "",
+            WBS: inv.wbs || "",
             ClaimAmount: parseFloat(inv.billAmount) || 0,
-            HSNCode: inv.hsnCode || "123456",
-            DocumentNo: inv.documentNo || `${1900000000 + i}`,
+            HSNCode: inv.hsnCode || "",
+            // Real document numbers come back from the SAP posting.
+            DocumentNo: inv.documentNo || "",
           },
           File: fileData,
           // Add upload status for debugging
@@ -586,7 +605,7 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
       let empInfo = {};
       if (submitterEmail) {
         try {
-          const url = `https://ocr-validations-hnh3e7g2bkhhf6hq.southeastasia-01.azurewebsites.net/employee-info?emp_email=${encodeURIComponent(submitterEmail)}`;
+          const url = `${EXPGENIE_CONFIG.OCR_URL}/employee-info?emp_email=${encodeURIComponent(submitterEmail)}`;
           const resp = await fetch(url);
           if (resp.ok) empInfo = await resp.json();
         } catch (e) { console.error('Error fetching employee info for view:', e); }
@@ -622,7 +641,7 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
       let empInfo = {};
       if (submitterEmail) {
         try {
-          const url = `https://ocr-validations-hnh3e7g2bkhhf6hq.southeastasia-01.azurewebsites.net/employee-info?emp_email=${encodeURIComponent(submitterEmail)}`;
+          const url = `${EXPGENIE_CONFIG.OCR_URL}/employee-info?emp_email=${encodeURIComponent(submitterEmail)}`;
           const resp = await fetch(url);
           if (resp.ok) empInfo = await resp.json();
         } catch (e) { console.error('Error fetching employee info for preview:', e); }
@@ -679,8 +698,21 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
             console.log("expense data in the index-----", expense);
             console.log("Email of the user----", allExpenses[0].email);
             const expTitle = expense?.ExpenseTitle || expense?.title || 'Expense';
-            const expTotal = expense?.ExpenseData?.[0]?.ItemData.ClaimAmount || expense?.TotalAmount || expense.invoices[0].ItemData.ClaimAmount;
-            const invoiceAmount = expense?.ExpenseData?.[0]?.InvoiceAmount || expense.invoices[0].ItemData.ClaimAmount || expense?.TotalAmount;
+            // `invoices` only exists on the approver-list mapping; expenses opened
+            // from My Claims / Home carry `ExpenseData` instead. Both are optional
+            // here, and the result is rendered with .toLocaleString(), so every
+            // step needs guarding and a numeric fallback — reaching into
+            // `.ItemData.` or `invoices[0]` unguarded crashed the detail screen.
+            const expTotal =
+              expense?.ExpenseData?.[0]?.ItemData?.ClaimAmount ||
+              expense?.TotalAmount ||
+              expense?.invoices?.[0]?.ItemData?.ClaimAmount ||
+              0;
+            const invoiceAmount =
+              expense?.ExpenseData?.[0]?.InvoiceAmount ||
+              expense?.invoices?.[0]?.ItemData?.ClaimAmount ||
+              expense?.TotalAmount ||
+              0;
             console.log("expTotal-----", JSON.stringify(expTotal));
             console.log("expense?.SubmissionDate", expense?.billDate);
             console.log("expense?.ExpenseFromDate", expense?.ExpenseFromDate);
@@ -702,9 +734,20 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
             // });
             const expApprover = expense?.ApproverEmail || '';
             const expStatus = expense?.ApprovalStatus || expense?.status || 'Pending';
-            const expDocNo = expense?.ExpenseData?.[0]?.ItemData?.DocumentNo || expense?.invoices?.[0].ItemData?.DocumentNo ||'N/A';
-            const rawNarration = expense?.ExpenseData?.[0]?.Narration || expense?.invoices?.[0]?.Narration || '';
-            const expNarration = rawNarration && rawNarration.trim() && rawNarration.trim().toLowerCase() !== 'business expense' ? rawNarration.trim() : '';
+            // Document number: prefer ItemData.DocumentNo, else fall back to the
+            // bill number (chatbot submissions set BillNumber but not DocumentNo).
+            const expBillNo = expense?.ExpenseData?.[0]?.BillNumber || expense?.invoices?.[0]?.BillNumber || '';
+            const expDocNo = expense?.ExpenseData?.[0]?.ItemData?.DocumentNo || expense?.invoices?.[0]?.ItemData?.DocumentNo || expBillNo || 'N/A';
+            const rawNarration = (expense?.ExpenseData?.[0]?.Narration || expense?.invoices?.[0]?.Narration || '').trim();
+            // Hide boilerplate narrations AND bill/document numbers that some
+            // submission paths stuff into the narration field.
+            const expNarration =
+              rawNarration &&
+              rawNarration.toLowerCase() !== 'business expense' &&
+              rawNarration !== String(expBillNo) &&
+              rawNarration !== String(expDocNo)
+                ? rawNarration
+                : '';
             console.log("expDocNo", expense );
             const isPending = expStatus.toLowerCase() === 'pending';
             const showButtons = mode === 'approveRejectView';
@@ -725,6 +768,31 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
                  {selfApprove ===true? <Text style={[styles.approved, { color: getStatusColor(expStatus), marginTop: 8 }]}>Self Approved</Text>: <Text style={[styles.approved, { color: getStatusColor(expStatus), marginTop: 8 }]}>
                     {expStatus}
                   </Text>}
+
+                  {/* Payment is a separate axis from approval: an expense can be
+                      Approved and still unpaid. Only meaningful once approved. */}
+                  {/^approv/i.test(expStatus) ? (
+                    <View style={styles.paymentRow}>
+                      <Text style={styles.masterText}>
+                        Payment:{' '}
+                        <Text
+                          style={{
+                            fontWeight: '700',
+                            color: isPaid(expense) ? '#16A34A' : '#B45309',
+                          }}
+                        >
+                          {paymentLabel(expense, paySettings).text}
+                        </Text>
+                      </Text>
+                      {isPaid(expense) && expense?.PaymentInfo?.PaidAt ? (
+                        <Text style={styles.paymentMeta}>
+                          Recorded by {expense.PaymentInfo.PaidBy || 'Finance'} on{' '}
+                          {formatDate(expense.PaymentInfo.PaidAt)}
+                          {expense.PaymentInfo.Note ? ` · ${expense.PaymentInfo.Note}` : ''}
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : null}
                 </View>
 
                 {/* Conveyance Details Section */}
@@ -1078,6 +1146,13 @@ const styles = StyleSheet.create({
   masterTitle: { color: '#fff', fontSize: 16, fontWeight: 'bold', textDecorationLine: 'underline' },
   masterText: { color: '#fff', marginTop: 4 },
   approved: { color: '#22C55E', fontWeight: 'bold', marginTop: 10 },
+  paymentRow: {
+    marginTop: 10,
+    paddingTop: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.25)',
+  },
+  paymentMeta: { color: 'rgba(255,255,255,0.75)', fontSize: 11, marginTop: 2 },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between' },
   cardIcons: { flexDirection: 'row' },
   addButton: { flexDirection: 'row', alignItems: 'center', padding: 12, borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 10, backgroundColor: '#fff', marginBottom: 16, alignSelf: 'flex-start' },

@@ -16,11 +16,21 @@ import { useAuth } from '../context/AuthContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { formatDate } from '../utils/dateUtils';
 import { toast } from '../components/ui';
+import {
+  getTenantSlug,
+  getTenantPaymentSettings,
+  markExpensePaid,
+  canRecordPayment,
+  isPaid,
+} from '../api/payments';
 
 import { BASE_URL } from '@env';
 
 // const URL = `${BASE_URL}/master-expense/approver`;
 const URL = `${BASE_URL}/master-expense/non-self-approve`;
+// Everything this user approves — used by the "To pay" tab to find the ones
+// they've already cleared that still need a payment record.
+const APPROVER_URL = `${BASE_URL}/master-expense/approver`;
 const MASTER_EXPENSE_BY_ID = `${BASE_URL}/master-expense/by-id`;
 // SAP integration removed: approvals now flow Manager → Finance Manager via the backend.
 
@@ -53,11 +63,21 @@ export default function ApprovalListScreen({ navigation, route }) {
   const [refreshing, setRefreshing] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
 
+  // 'pending' = awaiting my decision. 'topay' = I approved it and Finance still
+  // has to record the payment (tenants with no SAP connection).
+  const [tab, setTab] = useState('pending');
+  const [paySettings, setPaySettings] = useState(null);
+
   // Approve/Reject modal state
   const [selectedClaim, setSelectedClaim] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
   const [rejectComment, setRejectComment] = useState('');
+
+  // Mark-payment-done modal state
+  const [payClaim, setPayClaim] = useState(null);
+  const [payReference, setPayReference] = useState('');
+  const [payNote, setPayNote] = useState('');
   const REJECTION_REASONS = [
     { title: 'Missing or unclear receipt', value: 'missing_receipt' },
     { title: 'Exceeds policy limits', value: 'exceeds_policy' },
@@ -86,28 +106,53 @@ export default function ApprovalListScreen({ navigation, route }) {
         toast.error('User email not found. Please login again.', 'Session error');
         return;
       }
-      console.log('[Approvals] fetching approvals for:', email);
+      console.log('[Approvals] fetching approvals for:', email, 'tab:', tab);
 
+      // "Pending" = the approval queue. "To pay" = everything I approve, then
+      // narrowed below to the approved-but-unpaid ones.
+      const endpoint = tab === 'topay' ? APPROVER_URL : URL;
       const response = await fetch(
-        `${URL}?email=${encodeURIComponent(email)}`
+        `${endpoint}?email=${encodeURIComponent(email)}`
       );
 
-      const data = await response.json();
+      const raw = await response.json();
+      const data =
+        tab === 'topay'
+          ? (Array.isArray(raw) ? raw : []).filter(
+              (e) => /^approv/i.test(e?.ApprovalStatus || '') && !isPaid(e)
+            )
+          : raw;
 
-      const formatted = (Array.isArray(data) ? data : []).map((item) => ({
-        id: item.id,
-        email: item.SubmitterEmail,
-        title: item.ExpenseTitle,
-        submissionDate: `${new Date(item.ExpenseData[0].PostingDate).toLocaleDateString('en-GB')}`,
-        amount: item.ExpenseData[0].ItemData.ClaimAmount,
-        status: item.ApprovalStatus,
-        overdue: isOverdue(item.SubmissionDate),
-        invoices: item.ExpenseData || [],
-        ExpenseData: item.ExpenseData || [], // Ensure correct key for MasterExpenseScreen
-        ApprovalHistory: item.ApprovalHistory || [], // Pass ApprovalHistory
-        billDate: `${item.ExpenseData[0].DocumentDate}`,
-        requesterName: item.SubmitterEmail,
-      }));
+      // Chatbot / no-bill submissions can arrive without line items, and older
+      // rows have no ItemData. Reaching straight into ExpenseData[0] threw and
+      // took the whole list down with it, so read defensively per row.
+      const formatted = (Array.isArray(data) ? data : []).map((item) => {
+        const first = Array.isArray(item.ExpenseData) ? item.ExpenseData[0] : null;
+        const postingDate = first?.PostingDate;
+        const parsedPosting = postingDate ? new Date(postingDate) : null;
+        const validPosting = parsedPosting && !isNaN(parsedPosting.getTime());
+        return {
+          id: item.id,
+          email: item.SubmitterEmail,
+          title: item.ExpenseTitle,
+          submissionDate: validPosting
+            ? parsedPosting.toLocaleDateString('en-GB')
+            : (item.SubmissionDate || ''),
+          amount: first?.ItemData?.ClaimAmount ?? item.TotalAmount ?? 0,
+          status: item.ApprovalStatus,
+          overdue: isOverdue(item.SubmissionDate),
+          invoices: item.ExpenseData || [],
+          ExpenseData: item.ExpenseData || [], // Ensure correct key for MasterExpenseScreen
+          ApprovalHistory: item.ApprovalHistory || [], // Pass ApprovalHistory
+          billDate: first?.DocumentDate || '',
+          requesterName: item.SubmitterEmail,
+          // Carried through so the payment tab can render/act on it.
+          ApproverEmail: item.ApproverEmail,
+          ApprovalStatus: item.ApprovalStatus,
+          PaymentStatus: item.PaymentStatus,
+          PaymentInfo: item.PaymentInfo,
+        };
+      });
       setClaims(formatted);
     } catch (error) {
       console.error('Error fetching claims:', error);
@@ -119,11 +164,31 @@ export default function ApprovalListScreen({ navigation, route }) {
         setLoading(false);
       }
     }
-  }, [user]);
+  }, [user, tab]);
 
   useEffect(() => {
     void fetchClaims();
   }, [fetchClaims, user]);
+
+  // Does this tenant let Finance record payments by hand? Decides whether the
+  // "To pay" tab exists at all.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const slug = await getTenantSlug(user);
+      const settings = await getTenantPaymentSettings(slug);
+      if (!cancelled) setPaySettings(settings);
+    })();
+    return () => { cancelled = true; };
+  }, [user]);
+
+  const canPayHere = !!paySettings?.manualPaymentEnabled && !paySettings?.sapConnected;
+
+  // If the capability is switched off while the tab is open, fall back so the
+  // user isn't stranded on a tab that no longer applies.
+  useEffect(() => {
+    if (tab === 'topay' && paySettings && !canPayHere) setTab('pending');
+  }, [tab, paySettings, canPayHere]);
 
   // Listen for screen focus and refresh data
   useFocusEffect(
@@ -222,17 +287,47 @@ export default function ApprovalListScreen({ navigation, route }) {
     }
   };
 
+  const runMarkPaid = async () => {
+    if (!payClaim) return;
+    try {
+      setActionLoading(true);
+      const email =
+        user?.mail || user?.email || user?.userPrincipalName ||
+        (await AsyncStorage.getItem('user_email'));
+
+      const res = await markExpensePaid({
+        id: payClaim.id,
+        updatedBy: email,
+        reference: payReference.trim(),
+        note: payNote.trim(),
+      });
+      if (!res.success) throw new Error(res.error);
+
+      toast.success('Payment has been recorded for this claim.', 'Payment done');
+      setPayClaim(null);
+      setPayReference('');
+      setPayNote('');
+      await fetchClaims(true);
+    } catch (e) {
+      console.error('Mark paid error', e);
+      toast.error(e?.message || 'Could not record the payment.', 'Payment failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const renderCard = ({ item }) => {
+    const payTab = tab === 'topay';
     return (
       <TouchableOpacity
         onPress={() => {
-          console.log("item----", item);
           navigation.navigate('MasterExpenseScreen', {
             expenseData: item,
-            mode: 'approveRejectView',
+            mode: payTab ? 'view' : 'approveRejectView',
           });
         }}
         onLongPress={() => {
+          if (payTab) return; // approve/reject doesn't apply to already-approved claims
           setSelectedClaim(item);
           setModalVisible(true);
         }}
@@ -265,6 +360,20 @@ export default function ApprovalListScreen({ navigation, route }) {
                 ? item.status.charAt(0).toUpperCase() + item.status.slice(1)
                 : 'N/A'}
             </Text>
+
+            {payTab && canRecordPayment(user, item) ? (
+              <TouchableOpacity
+                style={styles.payBtn}
+                disabled={actionLoading}
+                onPress={() => {
+                  setPayClaim(item);
+                  setPayReference('');
+                  setPayNote('');
+                }}
+              >
+                <Text style={styles.payBtnText}>Mark paid</Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         </View>
       </TouchableOpacity>
@@ -275,7 +384,31 @@ export default function ApprovalListScreen({ navigation, route }) {
     <SafeAreaView style={styles.safeArea} edges={['top']}>
       <TopBar />
       <View style={styles.container}>
-        <Text style={styles.heading}>Pending Approval Requests</Text>
+        <Text style={styles.heading}>
+          {tab === 'topay' ? 'Awaiting Payment' : 'Pending Approval Requests'}
+        </Text>
+
+        {/* Only tenants without SAP get a manual payment step, and only when a
+            super-admin has enabled it — otherwise this tab doesn't exist. */}
+        {canPayHere ? (
+          <View style={styles.tabRow}>
+            {[
+              { key: 'pending', label: 'To approve' },
+              { key: 'topay', label: 'To pay' },
+            ].map((t) => (
+              <TouchableOpacity
+                key={t.key}
+                style={[styles.tabPill, tab === t.key && styles.tabPillActive]}
+                onPress={() => setTab(t.key)}
+                activeOpacity={0.85}
+              >
+                <Text style={[styles.tabText, tab === t.key && styles.tabTextActive]}>
+                  {t.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : null}
 
         {loading ? (
           <ActivityIndicator size="large" color="#2563EB" style={{ marginTop: 24 }} />
@@ -288,7 +421,11 @@ export default function ApprovalListScreen({ navigation, route }) {
             refreshing={refreshing}
             onRefresh={onRefresh}
             ListEmptyComponent={
-              <Text style={styles.noData}>No approval requests.</Text>
+              <Text style={styles.noData}>
+                {tab === 'topay'
+                  ? 'Nothing awaiting payment.'
+                  : 'No approval requests.'}
+              </Text>
             }
           />
         )}
@@ -335,6 +472,63 @@ export default function ApprovalListScreen({ navigation, route }) {
                 onPress={() => runDecision('Approved')}
               >
                 <Text style={styles.actionTextApprove}>{actionLoading ? 'Processing...' : 'Approve'}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Record payment (tenants without SAP) */}
+      <Modal
+        transparent
+        visible={!!payClaim}
+        animationType="slide"
+        onRequestClose={() => setPayClaim(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <Text style={styles.sheetTitle}>Record payment</Text>
+            <Text style={styles.payHint}>
+              Confirms that “{payClaim?.title || 'this claim'}” has been paid to{' '}
+              {payClaim?.requesterName || 'the employee'}. This is a manual record — it does not
+              move money.
+            </Text>
+
+            <Text style={styles.payLabel}>Reference (UTR / cheque / voucher no.)</Text>
+            <TextInput
+              style={styles.commentBox}
+              placeholder="Optional"
+              value={payReference}
+              onChangeText={setPayReference}
+              editable={!actionLoading}
+            />
+
+            <Text style={styles.payLabel}>Note</Text>
+            <TextInput
+              style={styles.commentBox}
+              placeholder="Optional"
+              value={payNote}
+              onChangeText={setPayNote}
+              editable={!actionLoading}
+              multiline
+            />
+
+            <View style={styles.actionsRow}>
+              <TouchableOpacity
+                style={[styles.actionBtn, styles.rejectBtn, { opacity: actionLoading ? 0.6 : 1 }]}
+                disabled={actionLoading}
+                onPress={() => setPayClaim(null)}
+              >
+                <Text style={styles.actionTextReject}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.actionBtn, styles.approveBtn, { opacity: actionLoading ? 0.6 : 1 }]}
+                disabled={actionLoading}
+                onPress={runMarkPaid}
+              >
+                <Text style={styles.actionTextApprove}>
+                  {actionLoading ? 'Saving...' : 'Confirm payment'}
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -394,4 +588,29 @@ const styles = StyleSheet.create({
   rejectBtn: { borderColor: '#EF4444' },
   actionTextApprove: { color: '#22C55E', fontWeight: '700' },
   actionTextReject: { color: '#EF4444', fontWeight: '700' },
+
+  tabRow: { flexDirection: 'row', marginBottom: 12, gap: 8 },
+  tabPill: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 999,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  tabPillActive: { backgroundColor: '#2563EB', borderColor: '#2563EB' },
+  tabText: { fontSize: 13, fontWeight: '700', color: '#374151' },
+  tabTextActive: { color: '#FFFFFF' },
+
+  payBtn: {
+    marginTop: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: '#16A34A',
+  },
+  payBtnText: { color: '#16A34A', fontWeight: '700', fontSize: 12 },
+  payHint: { fontSize: 12, color: '#6B7280', marginBottom: 12, lineHeight: 17 },
+  payLabel: { fontSize: 12, color: '#6B7280', marginTop: 8 },
 });

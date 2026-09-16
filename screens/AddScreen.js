@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import {
   View,
   Text,
@@ -22,57 +22,56 @@ import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { File, Paths } from "expo-file-system";
 import TopBar from "../components/TopBar";
-import { toast } from "../components/ui";
+import { toast, actionSheet } from "../components/ui";
 import { SafeAreaView } from "react-native-safe-area-context";
 // Removed multi-bill master view flow
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { uploadExpenseDocument, storeUploadedUrl, getUploadedUrl } from "../api/expenseUpload";
 import { WebView } from "react-native-webview";
 import { getCurrentFinancialYear } from '../services/FinancialYearUtils';
+import { getTenantSlug } from '../api/payments';
+import {
+  getTenantCategories,
+  categoryOptions,
+  subCategoryOptions,
+  defaultConveyanceCategory,
+  getTenantSapConfig,
+  getEmployeeDefaults,
+  resolveSapFields,
+} from '../api/tenantMasterData';
+import { EXPGENIE_CONFIG } from '../config/expgenie';
 import { BASE_URL } from '@env';
 
-// APIs
-const PROCESS_EXPENSE_API =
-  "https://ocr-validations-hnh3e7g2bkhhf6hq.southeastasia-01.azurewebsites.net/process-expense-with-grade";
-const BUDGET_CHECK_API =
-  "https://magicqa.tatahousing.com/Magicxpi4.13/MgWebRequester.dll?appname=IFSEMS_To_SAP&prgname=HTTP&arguments=-AHTTP_1%23Budget_CheckingAndBlocking";
+// Deployment-level endpoint (shared OCR service), from config — not inlined.
+const PROCESS_EXPENSE_API = `${EXPGENIE_CONFIG.OCR_URL}/process-expense-with-grade`;
 const API_BASE_URL = BASE_URL;
 
-// Category and Subcategory data
-const CATEGORY_OPTIONS = [
-  { label: "Select Category", value: "" },
-  { label: "Local Conveyance", value: "Local Conveyance" },
-  { label: "Food Expenses", value: "Food Expenses" },
-  { label: "Communication", value: "Communication" },
-];
+/**
+ * The SAP budget check, resolved per tenant.
+ *
+ * Returns `{ enabled, url }`. `enabled` is false — meaning skip the check and
+ * submit straight through — whenever the tenant has no SAP integration, no SAP
+ * endpoint configured, or the lookup fails. A tenant without SAP must never be
+ * blocked by, or have its bill data sent to, another company's SAP.
+ */
+async function resolveSapBudgetCheck() {
+  try {
+    const email = await AsyncStorage.getItem('user_email');
+    const slug = await getTenantSlug({ email });
+    const sap = await getTenantSapConfig(slug);
+    const url = (sap?.baseUrl || '').trim();
+    if (!sap?.enabled || !url) return { enabled: false, url: '' };
+    return { enabled: true, url };
+  } catch (e) {
+    console.warn('resolveSapBudgetCheck failed, skipping SAP budget check:', e?.message);
+    return { enabled: false, url: '' };
+  }
+}
 
-const SUBCATEGORY_OPTIONS = {
-  "Local Conveyance": [
-    { label: "Select Sub-Category", value: "" },
-    {
-      label: "Local Conveyance-Four Wheeler",
-      value: "Local Conveyance-Four Wheeler",
-    },
-    {
-      label: "Local Conveyance-Two Wheeler",
-      value: "Local Conveyance-Two Wheeler",
-    },
-    {
-      label: "Local Conveyance-Cab/Auto charges",
-      value: "Local Conveyance-Cab/Auto charges",
-    },
-  ],
-  "Food Expenses": [
-    { label: "Select Sub-Category", value: "" },
-    { label: "Refreshment Expenses", value: "Refreshment Expenses" },
-    { label: "Business Promotion", value: "Business Promotion" },
-  ],
-  Communication: [
-    { label: "Select Sub-Category", value: "" },
-    { label: "Telephone Reimbursement", value: "Telephone Reimbursement" },
-    { label: "Wifi Reimbursement", value: "Wifi Reimbursement" },
-  ],
-};
+// Categories and sub-categories are per tenant and come from
+// GET /categories?slug= — see api/tenantMasterData.js. They used to be a fixed
+// three-item list here, which meant every tenant saw one customer's categories
+// and the ones they configured in the dashboard were ignored.
 
 export default function EditExpenseScreen({ navigation }) {
   const nav = useNavigation();
@@ -92,6 +91,46 @@ export default function EditExpenseScreen({ navigation }) {
   const [destination, setDestination] = useState("");
   const [purpose, setPurpose] = useState("");
   const [showConveyanceDetails, setShowConveyanceDetails] = useState(false);
+
+  // Per-tenant master data. Replaces the hardcoded category list and the
+  // hardcoded SAP codes ("1000", "0000100401", "1000COIT02", "40203061", …)
+  // that used to be stamped onto every tenant's expenses.
+  const [tenantCategories, setTenantCategories] = useState([]);
+  const [tenantSap, setTenantSap] = useState({});
+  const [employeeDefaults, setEmployeeDefaults] = useState({});
+
+  // Dropdown data, derived from this tenant's own categories.
+  const categoryChoices = useMemo(
+    () => categoryOptions(tenantCategories),
+    [tenantCategories],
+  );
+  const subCategoryChoices = useMemo(
+    () => subCategoryOptions(tenantCategories, category || defaultConveyanceCategory(tenantCategories)),
+    [tenantCategories, category],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const email = await AsyncStorage.getItem('user_email');
+        if (!email) return;
+        const slug = await getTenantSlug({ email });
+        const [cats, sap, emp] = await Promise.all([
+          getTenantCategories(slug),
+          getTenantSapConfig(slug),
+          getEmployeeDefaults(email),
+        ]);
+        if (cancelled) return;
+        setTenantCategories(cats);
+        setTenantSap(sap);
+        setEmployeeDefaults(emp);
+      } catch (e) {
+        console.warn('Loading tenant master data failed:', e?.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   //const [policyFlags, setPolicyFlags] = useState([]);
   const [selectedImage, setSelectedImage] = useState(null);
@@ -220,7 +259,7 @@ export default function EditExpenseScreen({ navigation }) {
 
   const fetchAndCacheEmployeeInfo = async (email) => {
     try {
-      const url = `https://ocr-validations-hnh3e7g2bkhhf6hq.southeastasia-01.azurewebsites.net/employee-info?emp_email=${encodeURIComponent(email)}`;
+      const url = `${EXPGENIE_CONFIG.OCR_URL}/employee-info?emp_email=${encodeURIComponent(email)}`;
       const resp = await fetch(url);
       if (!resp.ok) {
         throw new Error('Failed to fetch employee info');
@@ -306,10 +345,17 @@ export default function EditExpenseScreen({ navigation }) {
     }
   };
 
-  // Budget Check API
+  // Budget Check API — only meaningful for tenants on that SAP landscape.
   const handleBudgetCheck = async (expense, item) => {
     try {
       setLoading(true);
+
+      const sapCheck = await resolveSapBudgetCheck();
+      if (!sapCheck.enabled) {
+        console.log('ℹ️ Tenant has no SAP integration — budget check not applicable.');
+        setLoading(false);
+        return;
+      }
 
       let base64Image = "";
       console.log("selectedFile", selectedFile);
@@ -343,29 +389,44 @@ export default function EditExpenseScreen({ navigation }) {
           }
           : null;
 
+      // SAP posting fields resolved per tenant: OCR value → this employee's own
+      // record → the tenant's SAP config → empty. Never another customer's codes.
+      const sapFields = resolveSapFields({
+        fromOcr: { ...expense, ...item },
+        employee: employeeDefaults,
+        sap: tenantSap,
+        categories: tenantCategories,
+        category,
+      });
+
       const payload = {
         ExpenseData: {
-          CompanyCode: expense.CompanyCode || "1000",
+          CompanyCode: sapFields.CompanyCode,
           PostingDate:
             expense.PostingDate || expense.DocumentDate || billDate || today,
           DocumentDate: expense.DocumentDate || billDate || today,
           Currency: expense.Currency || "INR",
           BillNumber: expense.BillNumber || billNumber,
-          EMSUniqueId: expense.EMSUniqueId || "4131",
-          VendorCode: expense.VendorCode || "0000100401",
-          SectionCode: expense.SectionCode || "1000",
+          // Generated per submission — a fixed id collided across every expense.
+          EMSUniqueId: expense.EMSUniqueId || `ems-${Date.now()}`,
+          VendorCode: sapFields.VendorCode,
+          SectionCode: sapFields.SectionCode,
           Narration: expense.Narration || narration,
           InvoiceAmount: Number(expense.InvoiceAmount) || Number(billAmount),
-          SelfApprove: expense.SelfApprove || true,
+          // Self-approval is decided by the tenant's policy on the server, and
+          // is always off in No-Policy mode. Default false so a bill routes to
+          // the manager; `x || true` here was always true, which silently
+          // self-approved every submission from the app.
+          SelfApprove: expense.SelfApprove === true,
           ExpenseType: expenseType, // Add expense type
           ConveyanceDetails: conveyanceDetails, // Add conveyance details
           ItemData: {
-            GLCode: item.GLCode || "40203061",
-            TaxCode: item.TaxCode || "G0",
-            CostCenter: item.CostCenter || "1000COIT02",
+            GLCode: sapFields.GLCode,
+            TaxCode: sapFields.TaxCode,
+            CostCenter: sapFields.CostCenter,
             ClaimAmount: Number(item.ClaimAmount) || Number(claimAmount),
-            HSNCode: item.HSNCode ? parseInt(item.HSNCode, 10) : (hsnCode ? parseInt(hsnCode, 10) : 998221),
-            FinancialYear: getCurrentFinancialYear() || "2025-2026",
+            HSNCode: item.HSNCode ? parseInt(item.HSNCode, 10) : (hsnCode ? parseInt(hsnCode, 10) : undefined),
+            FinancialYear: getCurrentFinancialYear(),
           },
           File: [
             {
@@ -384,7 +445,7 @@ export default function EditExpenseScreen({ navigation }) {
       console.log("=== Budget Check Request ===");
       console.log(JSON.stringify(payload, null, 2));
 
-      const response = await fetch(BUDGET_CHECK_API, {
+      const response = await fetch(sapCheck.url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -508,7 +569,7 @@ export default function EditExpenseScreen({ navigation }) {
       setBillDate(expense.DocumentDate || "");
       setBillAmount(expense.InvoiceAmount?.toString() || "");
       setClaimAmount(item.ClaimAmount?.toString() || "");
-      setHsnCode(item.HSNCode?.toString() || "998221");
+      setHsnCode(item.HSNCode?.toString() || "");
       setNarration(expense.Narration || "");
 
       // Log the mapped values for debugging
@@ -624,56 +685,113 @@ export default function EditExpenseScreen({ navigation }) {
       const ts = `${now.getHours()}${now.getMinutes()}${now.getSeconds()}`;
       const generatedRef = `NB-${today.replace(/-/g, '')}-${ts}`;
       const reference = billNumber || generatedRef;
+
+      // Never submit a bill as "Uncategorized": OCR usually categorises it,
+      // but when it didn't (and the user hasn't picked one) prompt for it now.
+      let resolvedCategory =
+        (expenseType === "Bill-Based"
+          ? ocrExpense?.Category || ocrExpense?.ItemData?.Category || category
+          : category) || "";
+      if (expenseType === "Bill-Based" && !resolvedCategory) {
+        const choices = categoryChoices.filter((c) => c.value);
+        // A tenant with no categories configured is a setup gap, not a user
+        // error — say so instead of asking them to pick from an empty list.
+        if (choices.length === 0) {
+          toast.error(
+            'No expense categories are set up for your organisation yet. Ask your admin to add them in the dashboard.',
+            'Categories not configured',
+          );
+          setLoading(false);
+          return;
+        }
+        const pick = await actionSheet({
+          title: 'Expense category',
+          description: 'Pick a category for this bill before submitting.',
+          options: choices.map((c) => ({
+            label: c.label,
+            icon: 'pricetag-outline',
+            value: c.value,
+          })),
+        });
+        if (!pick?.value) {
+          toast.warning('Please choose a category to submit this expense.', 'Category required');
+          setLoading(false);
+          return;
+        }
+        resolvedCategory = pick.value;
+        setCategory(pick.value);
+      }
+
+      // Per-tenant SAP posting fields — employee record and category GL mapping,
+      // never a hardcoded customer code. `info` is this user's own profile.
+      const sapFields = resolveSapFields({
+        fromOcr: { ...(ocrExpense || {}), ...(ocrExpense?.ItemData || {}) },
+        employee: {
+          CompanyCode: info?.CompanyCode || employeeDefaults.CompanyCode,
+          VendorCode: info?.VendorCode || employeeDefaults.VendorCode,
+          CostCenter: info?.CostCenter || employeeDefaults.CostCenter,
+          SectionCode: info?.SectionCode || employeeDefaults.SectionCode,
+        },
+        sap: tenantSap,
+        categories: tenantCategories,
+        category: resolvedCategory,
+      });
+
       let expenseItem;
       if (expenseType === "Bill-Based" && ocrExpense) {
         const oi = ocrExpense?.ItemData || {};
         expenseItem = {
-          CompanyCode: ocrExpense?.CompanyCode || info?.CompanyCode || "1000",
+          CompanyCode: sapFields.CompanyCode,
           PostingDate: ocrExpense?.PostingDate || billDate || today,
           DocumentDate: ocrExpense?.DocumentDate || billDate || today,
           Currency: ocrExpense?.Currency || "INR",
           BillNumber: ocrExpense?.BillNumber || billNumber || "",
           EMSUniqueId: ocrExpense?.EMSUniqueId || `ems-${Date.now()}`,
-          VendorCode: ocrExpense?.VendorCode || info?.VendorCode || "0000100401",
-          BusinessPlace: ocrExpense?.BusinessPlace || info?.OfficeLocation || "MH01",
-          SectionCode: ocrExpense?.SectionCode || info?.SectionCode || "1000",
+          VendorCode: sapFields.VendorCode,
+          BusinessPlace: ocrExpense?.BusinessPlace || info?.OfficeLocation || "",
+          SectionCode: sapFields.SectionCode,
           Narration: ocrExpense?.Narration || narration || "",
           InvoiceAmount: typeof ocrExpense?.InvoiceAmount === 'number' ? ocrExpense.InvoiceAmount : (parseFloat(billAmount) || 0),
-          Category: ocrExpense?.Category || category || undefined,
+          Category: resolvedCategory || undefined,
           SubCategory: ocrExpense?.SubCategory || subCategory || undefined,
-          SelfApprove: ocrExpense?.SelfApprove !== undefined ? ocrExpense.SelfApprove : true,
+          // Only self-approve when the server's policy evaluation said so.
+          // Defaulting to true here self-approved bills the policy never cleared.
+          SelfApprove: ocrExpense?.SelfApprove === true,
           ExpenseType: "Bill-Based",
           ConveyanceDetails: null,
           ItemData: {
-            GLCode: oi?.GLCode || "40203061",
-            TaxCode: oi?.TaxCode || "G0",
-            FinancialYear: getCurrentFinancialYear() || "2025-2026",
-            CostCenter: oi?.CostCenter || info?.CostCenter || "1000COIT02",
+            GLCode: sapFields.GLCode,
+            TaxCode: sapFields.TaxCode,
+            CostCenter: sapFields.CostCenter,
             ClaimAmount: typeof oi?.ClaimAmount === 'number' ? oi.ClaimAmount : (parseFloat(claimAmount) || 0),
-            HSNCode: oi?.HSNCode ? (typeof oi.HSNCode === 'string' ? oi.HSNCode : String(oi.HSNCode)) : (hsnCode || '998221'),
-            DocumentNo: oi?.DocumentNo || (billNumber || `${1900000000}`),
+            HSNCode: oi?.HSNCode ? (typeof oi.HSNCode === 'string' ? oi.HSNCode : String(oi.HSNCode)) : (hsnCode || ''),
+            // Real SAP document numbers come back from the posting; inventing a
+            // fixed one made every unposted expense share the same number.
+            DocumentNo: oi?.DocumentNo || billNumber || "",
             WBS: oi?.WBS || "",
-            FinancialYear: oi?.FinancialYear || info?.FinancialYear || "2025-2026",
+            // Single definition — this key was previously set twice in this
+            // literal, so the first value was always discarded.
+            FinancialYear: oi?.FinancialYear || info?.FinancialYear || getCurrentFinancialYear(),
           },
           File: finalFileArray,
         };
       } else {
         expenseItem = {
-          CompanyCode: info?.CompanyCode || "1000",
+          CompanyCode: sapFields.CompanyCode,
           PostingDate: billDate || today,
           DocumentDate: billDate || today,
           Currency: "INR",
           BillNumber: expenseType === "Non-Bill-Based" ? reference : (billNumber || ""),
           EMSUniqueId: `ems-${Date.now()}`,
-          VendorCode: info?.VendorCode || "0000100401",
-          BusinessPlace: info?.OfficeLocation || "MH01",
-          SectionCode: info?.SectionCode || "1000",
+          VendorCode: sapFields.VendorCode,
+          BusinessPlace: info?.OfficeLocation || "",
+          SectionCode: sapFields.SectionCode,
           Narration: narration || (expenseType === "Non-Bill-Based" ? `Non-bill expense on ${today}` : ""),
           InvoiceAmount: parseFloat(billAmount) || parseFloat(claimAmount) || 0,
           SelfApprove: false,
           ExpenseType: expenseType,
-          // For non-bill-based, category is always "Local Conveyance" (hidden from UI but sent in payload)
-          Category: expenseType === "Non-Bill-Based" ? (category || "Local Conveyance") : undefined,
+          // Whatever the user picked from this tenant's own category list.
+          Category: expenseType === "Non-Bill-Based" ? (category || resolvedCategory || undefined) : undefined,
           SubCategory: expenseType === "Non-Bill-Based" ? subCategory : undefined,
           ConveyanceDetails:
             expenseType === "Non-Bill-Based" && (distanceTravelled || origin || destination || purpose)
@@ -685,14 +803,12 @@ export default function EditExpenseScreen({ navigation }) {
               }
               : null,
           ItemData: {
-            GLCode: "40203007",
-            TaxCode: "G0",
-            CostCenter: info?.CostCenter || "",
+            GLCode: sapFields.GLCode,
+            TaxCode: sapFields.TaxCode,
+            CostCenter: sapFields.CostCenter,
             ClaimAmount: parseFloat(claimAmount) || parseFloat(billAmount) || 0,
-            HSNCode: hsnCode ? parseInt(hsnCode, 10) : 998221,
-            FinancialYear: getCurrentFinancialYear() || "2025-2026",
-            // DocumentNo: expenseType === "Non-Bill-Based" ? reference : `${1900000000}`,
-            // WBS: "",
+            HSNCode: hsnCode ? parseInt(hsnCode, 10) : undefined,
+            FinancialYear: getCurrentFinancialYear(),
           },
           // File: finalFileArray,
         };
@@ -706,33 +822,42 @@ export default function EditExpenseScreen({ navigation }) {
         },
       };
 
-      console.log("Calling Budget API:", JSON.stringify(budgetPayload, null, 2));
-      logProgress('Calling Budget Checking & Blocking API');
-      const budgetResp = await fetch(BUDGET_CHECK_API, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(budgetPayload),
-      });
-      const budgetText = await budgetResp.text();
-      let budgetJson = {};
-      try { budgetJson = JSON.parse(budgetText); } catch { }
-      if (!budgetResp.ok) {
-        const errMsg = budgetJson?.ExpenseDatas?.ErrorMessage || budgetText || 'Budget validation failed';
-        throw new Error(errMsg);
-      }
-      const expenseDatas = budgetJson?.ExpenseDatas || budgetJson?.ExpenseData || {};
-      const errorMsgStr = (expenseDatas?.ErrorMessage || '').toString();
-      console.log('🔎 Budget check response:', { status: budgetResp.status, body: budgetJson, errorMsgStr });
-      const isParked = errorMsgStr.toLowerCase().includes('successfully parked');
-      if (!isParked) {
-        console.warn('🚧 Budget check did not return "successfully parked" — flow stops here. Master-expense POST will NOT be sent.');
-        throw new Error(errorMsgStr || 'Budget validation failed');
-      }
-      console.log('✅ Budget check parked OK — proceeding to master-expense POST');
-      logProgress('Budget parked successfully');
-      // Apply returned identifiers to our expense item when available
-      if (expenseDatas?.DocumentNo) {
-        expenseItem.ItemData.DocumentNo = expenseDatas.DocumentNo;
+      // Only tenants wired to that SAP go through the budget gate. For everyone
+      // else the bill goes straight to the backend, which routes it
+      // Manager → Finance.
+      const sapCheck = await resolveSapBudgetCheck();
+      if (!sapCheck.enabled) {
+        console.log('ℹ️ Tenant has no SAP integration — skipping the SAP budget check.');
+        logProgress('Submitting expense');
+      } else {
+        console.log("Calling Budget API:", JSON.stringify(budgetPayload, null, 2));
+        logProgress('Calling Budget Checking & Blocking API');
+        const budgetResp = await fetch(sapCheck.url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(budgetPayload),
+        });
+        const budgetText = await budgetResp.text();
+        let budgetJson = {};
+        try { budgetJson = JSON.parse(budgetText); } catch { }
+        if (!budgetResp.ok) {
+          const errMsg = budgetJson?.ExpenseDatas?.ErrorMessage || budgetText || 'Budget validation failed';
+          throw new Error(errMsg);
+        }
+        const expenseDatas = budgetJson?.ExpenseDatas || budgetJson?.ExpenseData || {};
+        const errorMsgStr = (expenseDatas?.ErrorMessage || '').toString();
+        console.log('🔎 Budget check response:', { status: budgetResp.status, body: budgetJson, errorMsgStr });
+        const isParked = errorMsgStr.toLowerCase().includes('successfully parked');
+        if (!isParked) {
+          console.warn('🚧 Budget check did not return "successfully parked" — flow stops here. Master-expense POST will NOT be sent.');
+          throw new Error(errorMsgStr || 'Budget validation failed');
+        }
+        console.log('✅ Budget check parked OK — proceeding to master-expense POST');
+        logProgress('Budget parked successfully');
+        // Apply returned identifiers to our expense item when available
+        if (expenseDatas?.DocumentNo) {
+          expenseItem.ItemData.DocumentNo = expenseDatas.DocumentNo;
+        }
       }
       // if (expenseDatas?.EMSUniqueId) {
       //   expenseItem.EMSUniqueId = expenseDatas.EMSUniqueId;
@@ -945,7 +1070,10 @@ export default function EditExpenseScreen({ navigation }) {
                 ]}
                 onPress={() => {
                   setExpenseType("Non-Bill-Based");
-                  setCategory("Local Conveyance"); // Set category for non-bill-based
+                  // Conveyance category comes from this tenant's own list — it
+                  // used to be the literal "Local Conveyance", which only
+                  // existed for one customer.
+                  setCategory(defaultConveyanceCategory(tenantCategories));
                   setSelectedImage(null);
                   setSelectedFile(null);
                   setFileType(null);
@@ -1183,7 +1311,7 @@ export default function EditExpenseScreen({ navigation }) {
                       style={styles.picker}
                       mode="dropdown"
                     >
-                      {CATEGORY_OPTIONS.map((option) => (
+                      {categoryChoices.map((option) => (
                         <Picker.Item
                           key={option.value}
                           label={option.label}
@@ -1224,11 +1352,7 @@ export default function EditExpenseScreen({ navigation }) {
                       enabled={true}
                       mode="dropdown"
                     >
-                      {(
-                        SUBCATEGORY_OPTIONS["Local Conveyance"] || [
-                          { label: "Select Sub-Category", value: "" },
-                        ]
-                      ).map((option) => (
+                      {subCategoryChoices.map((option) => (
                         <Picker.Item
                           key={option.value}
                           label={option.label}
@@ -1388,9 +1512,9 @@ export default function EditExpenseScreen({ navigation }) {
             </>
           )}
 
-          {/* Conveyance Details - Only show for Non-Bill-Based + Local Conveyance */}
+          {/* Conveyance details — shown for the tenant's conveyance category */}
           {expenseType === "Non-Bill-Based" &&
-            category === "Local Conveyance" && (
+            category === defaultConveyanceCategory(tenantCategories) && (
               <View style={styles.conveyanceSection}>
                 <Text style={styles.conveyanceTitle}>Conveyance Details</Text>
 
@@ -1571,7 +1695,7 @@ export default function EditExpenseScreen({ navigation }) {
                 style={styles.pickerModalPicker}
                 itemStyle={styles.pickerItemStyle}
               >
-                {CATEGORY_OPTIONS.map((option) => (
+                {categoryChoices.map((option) => (
                   <Picker.Item
                     key={option.value}
                     label={option.label}
@@ -1616,11 +1740,7 @@ export default function EditExpenseScreen({ navigation }) {
                 itemStyle={styles.pickerItemStyle}
                 enabled={true}
               >
-                {(
-                  SUBCATEGORY_OPTIONS["Local Conveyance"] || [
-                    { label: "Select Sub-Category", value: "" },
-                  ]
-                ).map((option) => (
+                {subCategoryChoices.map((option) => (
                   <Picker.Item
                     key={option.value}
                     label={option.label}

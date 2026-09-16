@@ -259,20 +259,23 @@ export default function AddScreenMasterView({ navigation, onAddMoreBills }) {
           Currency: inv.currency || "INR",
           BillNumber: inv.billNumber,
           EMSUniqueId: `ems-${Date.now()}-${i}`,
-          VendorCode: inv.vendorCode || "vendor-001",
-          BusinessPlace: inv.businessPlace || "test-LOC",
-          SectionCode: inv.sectionCode || "test-SC",
+          // SAP posting fields come from the invoice/employee record — these
+          // used to fall back to test placeholders that reached real expenses.
+          VendorCode: inv.vendorCode || "",
+          BusinessPlace: inv.businessPlace || "",
+          SectionCode: inv.sectionCode || "",
           Narration: inv.narration,
           InvoiceAmount: parseFloat(inv.billAmount) || parseFloat(inv.claimAmount) || 0,
           SelfApprove: false,
           ItemData: {
-            GLCode: inv.glCode || "test-40503021",
+            GLCode: inv.glCode || "",
             TaxCode: inv.taxCode || "",
             CostCenter: inv.costCenter || "",
-            WBS: inv.wbs || "Test-WBS",
+            WBS: inv.wbs || "",
             ClaimAmount: parseFloat(inv.claimAmount) || parseFloat(inv.billAmount) || 0,
-            HSNCode: inv.hsnCode || "123456",
-            DocumentNo: inv.documentNo || `${1900000000 + i}`,
+            HSNCode: inv.hsnCode || "",
+            // Real document numbers come back from the SAP posting.
+            DocumentNo: inv.documentNo || "",
           },
           File: fileData,
           // Add upload status for debugging

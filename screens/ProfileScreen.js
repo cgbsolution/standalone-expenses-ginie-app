@@ -9,6 +9,7 @@ import {
   StatusBar,
   ActivityIndicator,
 } from 'react-native';
+import { Appearance } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { CommonActions } from '@react-navigation/native';
@@ -19,22 +20,18 @@ import { useAuth } from '../context/AuthContext';
 import {
   fetchProfile,
   uploadAvatar,
-  updateIntegrationProvider,
 } from '../api/userProfile';
+import {
+  getNotificationsEnabled,
+  setNotificationsEnabled,
+  getAppearance,
+  setAppearance,
+} from '../utils/prefs';
+
+const APPEARANCE_LABELS = { system: 'System', light: 'Light', dark: 'Dark' };
 
 const BRAND = tokens.color.accent;
 const BRAND_DARK = '#004F94';
-
-// Sign-in providers the user can connect on the Integrations row.
-const PROVIDERS = [
-  { value: 'microsoft', label: 'Microsoft', icon: 'logo-microsoft' },
-  { value: 'google', label: 'Google', icon: 'logo-google' },
-  { value: 'email', label: 'Email', icon: 'mail-outline' },
-];
-
-function providerLabel(value) {
-  return PROVIDERS.find((p) => p.value === value)?.label || 'None';
-}
 
 function getInitials(name) {
   if (!name) return 'U';
@@ -86,7 +83,7 @@ function SettingRow({ icon, iconBg, iconColor, label, value, onPress, isLast, da
 }
 
 export default function ProfileScreen({ navigation }) {
-  const { user, signOut, isMicrosoftUser, isEmailUser, updateLocalUser } = useAuth();
+  const { user, signOut, updateLocalUser } = useAuth();
 
   const userData = user
     ? {
@@ -106,11 +103,21 @@ export default function ProfileScreen({ navigation }) {
 
   // Local view-state, seeded from the auth user then refreshed from the backend.
   const [avatarUrl, setAvatarUrl] = useState(user?.avatarUrl || null);
-  const [provider, setProvider] = useState(
-    user?.integrationProvider ||
-      (isMicrosoftUser ? 'microsoft' : isEmailUser ? 'email' : null),
-  );
   const [uploading, setUploading] = useState(false);
+  const [notifEnabled, setNotifEnabled] = useState(true);
+  const [appearance, setAppearanceState] = useState('system');
+
+  // Load persisted device preferences on open.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [n, a] = await Promise.all([getNotificationsEnabled(), getAppearance()]);
+      if (cancelled) return;
+      setNotifEnabled(n);
+      setAppearanceState(a);
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // TODO: wire these to real API data
   const stats = {
@@ -119,7 +126,7 @@ export default function ProfileScreen({ navigation }) {
     avgApproval: '—',
   };
 
-  // Pull the latest avatar + integration provider from the backend on open.
+  // Pull the latest avatar from the backend on open.
   useEffect(() => {
     let cancelled = false;
     if (!userData.email) return;
@@ -127,7 +134,6 @@ export default function ProfileScreen({ navigation }) {
       const res = await fetchProfile(userData.email);
       if (cancelled || !res.success || !res.user) return;
       if (res.user.avatarUrl) setAvatarUrl(res.user.avatarUrl);
-      if (res.user.integrationProvider) setProvider(res.user.integrationProvider);
     })();
     return () => {
       cancelled = true;
@@ -205,32 +211,6 @@ export default function ProfileScreen({ navigation }) {
     else if (choice?.value === 'library') pickFromLibrary();
   }, [uploading, takePhoto, pickFromLibrary]);
 
-  const handleIntegrationsPress = useCallback(async () => {
-    const choice = await actionSheet({
-      title: 'Sign-in provider',
-      description: 'Connect the account you use to sign in.',
-      options: PROVIDERS.map((p) => ({
-        label: p.label,
-        icon: p.icon,
-        value: p.value,
-        detail: p.value === provider ? 'Current' : undefined,
-      })),
-      cancelLabel: 'Cancel',
-    });
-    if (!choice?.value || choice.value === provider) return;
-
-    const previous = provider;
-    setProvider(choice.value); // optimistic
-    const res = await updateIntegrationProvider(userData.email, choice.value);
-    if (res.success) {
-      await updateLocalUser({ integrationProvider: choice.value });
-      toast.success(`Provider set to ${providerLabel(choice.value)}.`, 'Saved');
-    } else {
-      setProvider(previous); // roll back
-      toast.error(res.error || 'Could not update your provider.', 'Update failed');
-    }
-  }, [provider, userData.email, updateLocalUser]);
-
   const handleLogout = async () => {
     const ok = await confirm({
       variant: 'destructive',
@@ -269,6 +249,41 @@ export default function ProfileScreen({ navigation }) {
       toast.error('Failed to logout. Please try again.', 'Logout failed');
     }
   };
+
+  const handleNotificationsPress = useCallback(async () => {
+    const choice = await actionSheet({
+      title: 'Notifications',
+      description: 'Get alerts for approvals, rejections, and reimbursements.',
+      options: [
+        { label: 'On', icon: 'notifications', value: 'on', detail: notifEnabled ? 'Current' : undefined },
+        { label: 'Off', icon: 'notifications-off-outline', value: 'off', detail: !notifEnabled ? 'Current' : undefined },
+      ],
+      cancelLabel: 'Cancel',
+    });
+    if (!choice?.value) return;
+    const on = choice.value === 'on';
+    setNotifEnabled(on);
+    await setNotificationsEnabled(on);
+    toast.success(`Notifications turned ${on ? 'on' : 'off'}.`, 'Saved');
+  }, [notifEnabled]);
+
+  const handleAppearancePress = useCallback(async () => {
+    const choice = await actionSheet({
+      title: 'Appearance',
+      description: 'Choose how ExpenseGenie looks.',
+      options: [
+        { label: 'System', icon: 'phone-portrait-outline', value: 'system', detail: appearance === 'system' ? 'Current' : undefined },
+        { label: 'Light', icon: 'sunny-outline', value: 'light', detail: appearance === 'light' ? 'Current' : undefined },
+        { label: 'Dark', icon: 'moon-outline', value: 'dark', detail: appearance === 'dark' ? 'Current' : undefined },
+      ],
+      cancelLabel: 'Cancel',
+    });
+    if (!choice?.value) return;
+    setAppearanceState(choice.value);
+    await setAppearance(choice.value);
+    Appearance.setColorScheme(choice.value === 'system' ? null : choice.value);
+    toast.success(`Appearance set to ${APPEARANCE_LABELS[choice.value]}.`, 'Saved');
+  }, [appearance]);
 
   const notImplemented = (feature) =>
     toast.info(`${feature} settings are coming soon.`, 'Not available yet');
@@ -354,24 +369,16 @@ export default function ProfileScreen({ navigation }) {
             iconBg="#FEF3C7"
             iconColor="#D97706"
             label="Notifications"
-            value="On"
-            onPress={() => notImplemented('Notifications')}
+            value={notifEnabled ? 'On' : 'Off'}
+            onPress={handleNotificationsPress}
           />
           <SettingRow
             icon="moon-outline"
             iconBg="#FEF3C7"
             iconColor="#D97706"
             label="Appearance"
-            value="System"
-            onPress={() => notImplemented('Appearance')}
-          />
-          <SettingRow
-            icon="grid-outline"
-            iconBg="#E0E7FF"
-            iconColor="#6366F1"
-            label="Integrations"
-            value={providerLabel(provider)}
-            onPress={handleIntegrationsPress}
+            value={APPEARANCE_LABELS[appearance]}
+            onPress={handleAppearancePress}
             isLast
           />
         </View>

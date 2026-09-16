@@ -25,6 +25,7 @@ import { BASE_URL } from '@env';
 import { confirm, tokens } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { fetchUnreadCount } from '../api/notifications';
+import { getNotificationsEnabled } from '../utils/prefs';
 
 const API_URL = `${BASE_URL}/master-expense`;
 const BRAND = tokens.color.accent;
@@ -402,6 +403,11 @@ export default function HomeScreen() {
       if (!userEmail) return;
       let active = true;
       (async () => {
+        // Respect the Profile → Notifications preference.
+        if (!(await getNotificationsEnabled())) {
+          if (active) setUnreadCount(0);
+          return;
+        }
         const res = await fetchUnreadCount(userEmail);
         if (active) setUnreadCount(res.count || 0);
       })();
