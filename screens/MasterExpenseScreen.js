@@ -152,6 +152,10 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
     return expenseData ? [expenseData] : [];
   }, [expenseData]);
 
+  // Approve modal state — the manager can leave a comment or skip it.
+  const [approveModalVisible, setApproveModalVisible] = useState(false);
+  const [approveComment, setApproveComment] = useState('');
+
   // Reject modal state
   const [rejectModalVisible, setRejectModalVisible] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
@@ -500,14 +504,15 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
     }
   };
 
-  const approveClaim = async () => {
-    const ok = await confirm({
-      title: 'Approve this claim?',
-      message: 'Once approved, this claim will be forwarded to the next approver in the chain.',
-      confirmLabel: 'Approve',
-      cancelLabel: 'Cancel',
-    });
-    if (ok) runStatusUpdate('Approved');
+  // Open the approval dialog. The comment is optional — "Skip" approves without one.
+  const approveClaim = () => {
+    setApproveComment('');
+    setApproveModalVisible(true);
+  };
+
+  const submitApproval = (comment) => {
+    setApproveModalVisible(false);
+    runStatusUpdate('Approved', undefined, (comment || '').trim());
   };
 
   const rejectClaim = () => {
@@ -1040,6 +1045,77 @@ export default function MasterExpenseScreen({ navigation, route, isAppBarVisible
             </TouchableOpacity>
           </View>
         </View>
+      </Modal>
+
+      {/* Approval comment modal — comment is optional, "Skip" approves without one */}
+      <Modal
+        transparent
+        visible={approveModalVisible}
+        animationType="slide"
+        onRequestClose={() => setApproveModalVisible(false)}
+      >
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+          <View style={styles.modalBackground}>
+            <KeyboardAvoidingView
+              behavior={Platform.OS === 'ios' ? 'padding' : 'padding'}
+              style={{ width: '100%', alignItems: 'center' }}
+            >
+              <View style={styles.modalContainer}>
+                <Text style={styles.modalTitle}>Approve this claim?</Text>
+                <Text style={{ color: '#475569', fontSize: 13, marginBottom: 12 }}>
+                  Once approved, this claim will be forwarded to the next approver in the chain.
+                  You can add a comment for the record, or skip it.
+                </Text>
+
+                <Text style={{ fontSize: 12, color: '#6B7280', marginBottom: 6 }}>
+                  Approval comment (optional)
+                </Text>
+                <TextInput
+                  style={[styles.input, { height: 90, textAlignVertical: 'top' }]}
+                  value={approveComment}
+                  onChangeText={setApproveComment}
+                  placeholder="e.g. Verified against policy, receipts attached"
+                  editable={!isApproving}
+                  multiline
+                />
+
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                  <TouchableOpacity
+                    disabled={isApproving}
+                    style={[styles.outlinedButton, { borderColor: '#CBD5E1', flex: 1, opacity: isApproving ? 0.6 : 1 }]}
+                    onPress={() => submitApproval('')}
+                  >
+                    <Text style={[styles.outlinedButtonText, { color: '#475569' }]}>Skip</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    disabled={isApproving || !approveComment.trim()}
+                    style={[
+                      styles.outlinedButton,
+                      {
+                        borderColor: '#22C55E',
+                        flex: 1,
+                        opacity: isApproving || !approveComment.trim() ? 0.5 : 1,
+                      },
+                    ]}
+                    onPress={() => submitApproval(approveComment)}
+                  >
+                    <Text style={[styles.outlinedButtonText, { color: '#22C55E' }]}>
+                      {isApproving ? 'Processing...' : 'Approve'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <TouchableOpacity
+                  disabled={isApproving}
+                  style={{ marginTop: 12, alignItems: 'center' }}
+                  onPress={() => setApproveModalVisible(false)}
+                >
+                  <Text style={{ color: '#94A3B8', fontSize: 13 }}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            </KeyboardAvoidingView>
+          </View>
+        </TouchableWithoutFeedback>
       </Modal>
 
       {/* Reject reasons modal */}

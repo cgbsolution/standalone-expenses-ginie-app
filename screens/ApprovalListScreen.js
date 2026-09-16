@@ -74,6 +74,10 @@ export default function ApprovalListScreen({ navigation, route }) {
   const [rejectReason, setRejectReason] = useState('');
   const [rejectComment, setRejectComment] = useState('');
 
+  // Approval comment modal — the comment is optional ("Skip" approves without one).
+  const [approveModalVisible, setApproveModalVisible] = useState(false);
+  const [approveComment, setApproveComment] = useState('');
+
   // Mark-payment-done modal state
   const [payClaim, setPayClaim] = useState(null);
   const [payReference, setPayReference] = useState('');
@@ -278,6 +282,8 @@ export default function ApprovalListScreen({ navigation, route }) {
       setSelectedClaim(null);
       setRejectReason('');
       setRejectComment('');
+      setApproveModalVisible(false);
+      setApproveComment('');
       await fetchClaims(true);
     } catch (e) {
       console.error('Decision error', e);
@@ -469,11 +475,76 @@ export default function ApprovalListScreen({ navigation, route }) {
               <TouchableOpacity
                 style={[styles.actionBtn, styles.approveBtn, { opacity: actionLoading ? 0.6 : 1 }]}
                 disabled={actionLoading}
-                onPress={() => runDecision('Approved')}
+                onPress={() => {
+                  setApproveComment('');
+                  setModalVisible(false);
+                  setApproveModalVisible(true);
+                }}
               >
                 <Text style={styles.actionTextApprove}>{actionLoading ? 'Processing...' : 'Approve'}</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Approval comment sheet — comment optional, "Skip" approves without one */}
+      <Modal
+        transparent
+        visible={approveModalVisible}
+        animationType="slide"
+        onRequestClose={() => setApproveModalVisible(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <Text style={styles.sheetTitle}>Approve this claim?</Text>
+            <Text style={styles.payHint}>
+              Add a comment for the approval record, or skip it. Your comment is saved in the
+              claim's approval history.
+            </Text>
+
+            <Text style={styles.payLabel}>Approval comment (optional)</Text>
+            <TextInput
+              style={styles.commentBox}
+              placeholder="e.g. Verified against policy, receipts attached"
+              value={approveComment}
+              onChangeText={setApproveComment}
+              editable={!actionLoading}
+              multiline
+            />
+
+            <View style={styles.actionsRow}>
+              <TouchableOpacity
+                style={[styles.actionBtn, styles.rejectBtn, { borderColor: '#CBD5E1', opacity: actionLoading ? 0.6 : 1 }]}
+                disabled={actionLoading}
+                onPress={() => runDecision('Approved', '', '')}
+              >
+                <Text style={[styles.actionTextReject, { color: '#475569' }]}>
+                  {actionLoading ? 'Processing...' : 'Skip'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.actionBtn,
+                  styles.approveBtn,
+                  { opacity: actionLoading || !approveComment.trim() ? 0.5 : 1 },
+                ]}
+                disabled={actionLoading || !approveComment.trim()}
+                onPress={() => runDecision('Approved', '', approveComment.trim())}
+              >
+                <Text style={styles.actionTextApprove}>
+                  {actionLoading ? 'Processing...' : 'Approve'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              disabled={actionLoading}
+              style={{ marginTop: 12, alignItems: 'center' }}
+              onPress={() => setApproveModalVisible(false)}
+            >
+              <Text style={{ color: '#94A3B8', fontSize: 13 }}>Cancel</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>

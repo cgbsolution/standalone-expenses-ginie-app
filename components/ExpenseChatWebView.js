@@ -268,7 +268,10 @@ function buildInjectedJs() {
             if (document.querySelector('#messages .msg.typing')) return; // host already shows one
             mine = document.createElement('div');
             mine.className = 'msg typing';
-            mine.textContent = '…';
+            // Must be the host's three <i> dots, not a '…' glyph — the CSS
+            // animation is keyed to '.msg.typing i', so a text ellipsis rendered
+            // as a dead bubble while the server-pushed one bounced.
+            mine.innerHTML = '<i></i><i></i><i></i>';
             messages.appendChild(mine);
             messages.scrollTop = messages.scrollHeight;
             clearTimeout(failsafe);

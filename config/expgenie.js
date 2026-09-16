@@ -13,7 +13,7 @@
 
 import { BASE_URL, CHAT_URL, UPLOAD_URL, OCR_URL } from '@env';
 
-const DEFAULT_HOST = 'https://147.93.103.97';
+const DEFAULT_HOST = 'https://chatbot-api.epfassist.com';
 
 export const EXPGENIE_CONFIG = {
   CHAT_BASE_URL: CHAT_URL || `${DEFAULT_HOST}/chat`,

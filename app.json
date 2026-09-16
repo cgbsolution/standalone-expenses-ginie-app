@@ -22,15 +22,7 @@
         "NSMicrophoneUsageDescription": "This app needs microphone access for voice input in the chat.",
         "NSPhotoLibraryUsageDescription": "This app needs photo library access to upload expense bills",
         "NSAppTransportSecurity": {
-          "NSAllowsArbitraryLoads": false,
-          "NSExceptionDomains": {
-            "147.93.103.97": {
-              "NSExceptionAllowsInsecureHTTPLoads": true,
-              "NSIncludesSubdomains": true,
-              "NSExceptionMinimumTLSVersion": "TLSv1.0",
-              "NSExceptionRequiresForwardSecrecy": false
-            }
-          }
+          "NSAllowsArbitraryLoads": false
         }
       },
       "appleTeamId": "MS6YT75Q89"
@@ -63,9 +55,6 @@
           "ios": {
             "deploymentTarget": "15.1",
             "newArchEnabled": true
-          },
-          "android": {
-            "usesCleartextTraffic": true
           }
         }
       ],

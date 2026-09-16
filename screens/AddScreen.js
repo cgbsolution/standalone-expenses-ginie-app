@@ -2074,7 +2074,10 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: 0,
     borderBottomRightRadius: 0,
     borderWidth: 0,
-    resizeMode: "cover",
+    // Receipts are tall — "cover" cropped the top/bottom of the bill, hiding
+    // the vendor and total. "contain" shows the whole thing.
+    resizeMode: "contain",
+    backgroundColor: "#F3F4F6",
   },
   deleteButton: {
     position: "absolute",
